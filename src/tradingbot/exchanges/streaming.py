@@ -188,6 +188,20 @@ class StreamManager:
 
     async def stop(self) -> None:
         self.active = False
+        await self._cancel_tasks()
+
+    async def resubscribe(self, markets: list[Market]) -> None:
+        """Re-point the live subscriptions at a new market set (after the universe
+        re-curates). Cancels current client tasks and restarts them; existing
+        LocalBooks for still-tracked markets are kept warm."""
+        await self._cancel_tasks()
+        for client in self.clients:
+            subset = [m for m in markets if m.venue is client.venue]
+            if subset:
+                self._tasks.append(asyncio.create_task(client.run(subset, self.books, self.mark)))
+        log.info("streaming.resubscribed", markets=len(markets))
+
+    async def _cancel_tasks(self) -> None:
         for t in self._tasks:
             t.cancel()
         for t in self._tasks:

@@ -33,6 +33,20 @@ decimals) to this.
 
 ---
 
+## 1a. Market selection — what gets tracked vs traded **[implemented]**
+
+Two layers. **Discovery/curation** (`engine/universe.py`) decides *what's
+tracked*: each venue is queried for tradeable markets (Polymarket via the Gamma
+API filtered to `active & not closed` and sorted by 24h volume — the CLOB
+`active=true` list is mostly *closed* markets; Kalshi by `status=open` with
+volume), then `UniverseSelector` filters by `min_volume` / `categories` /
+`watchlist`, ranks by 24h volume, and keeps the top `max_per_venue` per venue. It
+**re-curates** every `refresh_interval_min` (markets open/close/resolve) and the
+stream resubscribes to the new set. **Selection** then decides *what's traded*:
+strategies pick within the universe by edge (arb: `min_edge`; MM: widest spreads)
+and risk bounds exposure. See `Roadmap.md` → "How market selection works" for the
+full description. Knobs: `TB_UNIVERSE_*`.
+
 ## 2. The engine tick **[implemented]**
 
 Every `TB_LOOP_INTERVAL_S` seconds:

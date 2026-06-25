@@ -116,6 +116,21 @@ class AutopilotSettings(BaseSettings):
     briefing: bool = True                 # push an agent briefing to Telegram each cycle
 
 
+class UniverseSettings(BaseSettings):
+    """Which markets the bot tracks ("universe curation"). Discovery filters to
+    genuinely tradeable, liquid markets, ranks by volume, caps per venue, and
+    re-curates periodically (markets open/close/resolve). Strategies then pick
+    within this universe by edge/spread."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_UNIVERSE_")
+
+    max_per_venue: int = 100         # keep the top-N most-liquid markets per venue
+    min_volume: float = 0.0          # drop markets below this 24h volume (0 = keep all)
+    refresh_interval_min: float = 10.0  # re-curate this often (0 disables)
+    categories: list[str] = Field(default_factory=list)  # e.g. ["politics","sports"]; empty = all
+    watchlist: list[str] = Field(default_factory=list)   # market_ids/tickers/event_ids; empty = all
+
+
 class MarketMakerSettings(BaseSettings):
     """Market-maker params. Quote both sides when a market's spread clears
     min_spread; size each side by quote_size, bounded by max_inventory; quote the
@@ -172,6 +187,7 @@ class Settings(BaseSettings):
 
     enabled_strategies: list[str] = Field(default_factory=lambda: ["arbitrage"])
 
+    universe: UniverseSettings = Field(default_factory=UniverseSettings)
     risk: RiskLimits = Field(default_factory=RiskLimits)
     exits: ExitSettings = Field(default_factory=ExitSettings)
     market_maker: MarketMakerSettings = Field(default_factory=MarketMakerSettings)

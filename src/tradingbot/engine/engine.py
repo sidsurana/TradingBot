@@ -24,6 +24,7 @@ from tradingbot.engine.goals import GoalTracker
 from tradingbot.engine.portfolio import Portfolio
 from tradingbot.engine.risk import RiskManager
 from tradingbot.engine.router import ExchangeRouter
+from tradingbot.engine.universe import UniverseSelector
 from tradingbot.exchanges.base import Exchange
 from tradingbot.exchanges.paper import PaperExchange
 from tradingbot.models import Fill, Market, OrderBook, OrderStatus
@@ -48,6 +49,7 @@ class Engine:
         self.risk = RiskManager(settings.risk, self.portfolio)
         self.goals = GoalTracker(settings.goals)
         self.exits = ExitManager(settings.exits)
+        self.universe = UniverseSelector(settings.universe)
         self._locked_day = ""        # day on which lock-gains already fired
         self._paused_by_goals = False
 
@@ -76,9 +78,13 @@ class Engine:
         self.manual_orders: list = []  # discretionary orders queued by the agent/operator
         self._quotes: dict[tuple, object] = {}  # (market_key, side) -> live MM resting quote
 
-    async def discover(self, event_filter: str | None = None, limit: int = 200) -> None:
-        self.markets = (await self.router.list_markets(event_filter=event_filter))[:limit]
-        log.info("engine.universe", count=len(self.markets))
+    async def discover(self, event_filter: str | None = None, limit: int | None = None) -> None:
+        raw = await self.router.list_markets(event_filter=event_filter)
+        selected = self.universe.select(raw)
+        if limit is not None:
+            selected = selected[:limit]
+        self.markets = selected
+        log.info("engine.universe", discovered=len(raw), tracked=len(self.markets))
 
     def stop(self) -> None:
         self._stop.set()
@@ -92,6 +98,9 @@ class Engine:
             if self.settings.streaming.event_driven:
                 reactor_task = asyncio.create_task(self._reactor())
                 log.info("engine.event_driven", debounce_s=self.settings.streaming.react_debounce_s)
+        curator_task = None
+        if self.settings.universe.refresh_interval_min > 0:
+            curator_task = asyncio.create_task(self._curator())
         try:
             while not self._stop.is_set():
                 await self._tick()
@@ -107,12 +116,13 @@ class Engine:
                 except asyncio.TimeoutError:
                     pass
         finally:
-            if reactor_task is not None:
-                reactor_task.cancel()
-                try:
-                    await reactor_task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
+            for task in (reactor_task, curator_task):
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
             if self.stream is not None:
                 await self.stream.stop()
             log.info("engine.stopped",
@@ -209,6 +219,29 @@ class Engine:
             if b is not None and (b.best_bid or b.best_ask):
                 books[m.key] = b
         return books
+
+    async def _curator(self) -> None:
+        """Periodically re-curate the universe (markets open / close / resolve) and
+        re-point the stream at the new set. The selector is cheap; this just keeps
+        the tracked universe live without a restart."""
+        interval = self.settings.universe.refresh_interval_min * 60
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                return  # stop requested
+            except asyncio.TimeoutError:
+                pass
+            try:
+                old = {m.key for m in self.markets}
+                await self.discover()
+                new = {m.key for m in self.markets}
+                if new != old:
+                    if self.stream is not None and self.stream.active:
+                        await self.stream.resubscribe(self.markets)
+                    log.info("universe.recurated",
+                             added=len(new - old), removed=len(old - new), tracked=len(new))
+            except Exception as exc:  # noqa: BLE001
+                log.error("curator.error", error=str(exc))
 
     async def _reactor(self) -> None:
         """Waits on stream updates and fires the fast path, debounced to coalesce

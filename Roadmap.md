@@ -26,6 +26,7 @@ See `Logic.md` for how each shipped piece works, `SETUP.md` to run it.
 | 12 | WebSocket streaming — Polymarket | **live-validated, ~40 ms push** |
 | 13 | Event-driven acting | **live-validated, ~11 ms react; edge→fill ~100–200 ms** |
 | 14 | Kalshi live order signing (RSA) | signing tested |
+| 15 | Universe curation (tradeable filter + volume rank + periodic refresh) | **live-validated**; Polymarket via Gamma API, Kalshi by volume |
 
 ---
 
@@ -102,67 +103,33 @@ can't be confirmed without a live account.
 - **Fail-safe degradation.** Streaming falls back to REST; a dead component
   shouldn't take the bot down silently.
 
+---
 
+## How market selection works (shipped — item 15)
 
----- 
-My recommendation for what's next
+Two layers, so "which markets does the bot trade" has a precise answer:
 
-  The fast path is now done and proven. Before you point real money at it unattended, the most
-  important next piece is persistence (#15 in the roadmap) — right now a restart loses positions and
-  re-baselines your daily goal mid-day, which is risky for a 24/7 bot. After that, the signal/Kelly 
-  strategy gives you a third income stream. Want me to build persistence next, or go for the signal
-  strategy?
+**Layer 1 — Discovery / curation (`engine/universe.py`).** `discover()` pulls a
+wide list from each venue, then `UniverseSelector` curates it:
+- **Tradeable only.** Polymarket comes from the **Gamma API**
+  (`active=true&closed=false`, sorted by `volume24hr`) — not the CLOB
+  `active=true` list, which is mostly *closed* markets. Kalshi comes from
+  `status=open` with 24h volume attached.
+- **Filter** by `min_volume` (drop dust), `categories`, and an optional
+  `watchlist`.
+- **Rank by 24h volume** and keep the top `max_per_venue` per venue.
+- **Re-curate** every `refresh_interval_min` (markets open/close/resolve); the
+  WebSocket stream resubscribes to the new set automatically.
 
-  Layer 1 — Discovery: what gets tracked
+Config: `TB_UNIVERSE_*`. Live-validated: 400 discovered → 50 tracked, ranked by
+volume (multi-$M 24h markets), no closed markets.
 
-  engine.discover() (engine.py:80) just aggregates each venue's list_markets() and takes the first
-  200:
-  - Kalshi → GET /markets?status=open&limit=200
-  - Polymarket → GET /markets?active=true
+**Layer 2 — Selection (strategies + risk).** Within that universe each strategy
+picks by its own edge: **arbitrage** acts only where a dutch-book or cross-venue
+edge clears `min_edge`; the **market maker** quotes the widest-spread
+`max_markets` above `min_spread`; the **event-driven reactor** concentrates on
+markets that are actually moving; the **risk manager** bounds per-market and
+gross exposure regardless.
 
-  This is naive and it's the real gap. There's no liquidity, volume, or quality filter — it's "the
-  first 200 the venue hands back." Worse, I found during the streaming validation that Polymarket's
-  active=true list is full of closed/resolved markets (you have to use the Gamma API or filter
-  accepting_orders + enable_order_book). So today the universe can include markets you can't actually
-  trade. This works for paper/demo but is not what you'd point real money at.
-
-  Layer 2 — Selection: which tracked markets actually get traded
-
-  This part is genuinely sound — each strategy picks within the tracked universe by its own edge
-  criteria:
-
-  - Arbitrage scans the whole universe every evaluation and only acts where a real edge exists: a
-  dutch-book (complete-set asks summing < 1.0) or a cross-venue dislocation, both gated by min_edge
-  (0.02). It "picks" markets where there's risk-free money, ignores the rest.
-  - Market maker ranks markets by spread (widest first) and quotes only the top max_markets (15)
-  whose spread ≥ min_spread. So it picks the most-profitable-to-make books and ignores tight or
-  illiquid ones.
-  - Event-driven reactor concentrates compute/reactions on markets that are actually moving (the
-  dirty set), so attention follows activity.
-  - Risk manager then bounds everything — per-market position/notional caps + gross cap — so no
-  single market gets over-weighted even if a strategy loves it.
-
-  So the flow is: discovery casts a wide net → strategies filter by edge/spread → risk bounds 
-  exposure.
-
-  The fix (and why it matters)
-
-  The selection logic is right; discovery needs to become real market curation. A proper universe
-  layer would:
-  1. Filter to genuinely tradeable markets — Polymarket via the Gamma API (closed=false,
-  accepting_orders=true, sorted by 24h volume); Kalshi by open status + volume/liquidity.
-  2. Rank by a tradeability score — volume + spread + time-to-resolution — and cap to the top N
-  most-liquid.
-  3. Refresh periodically — markets open, close, and resolve, so the universe should roll over (e.g.,
-  re-curate every few minutes), not be fixed at startup.
-  4. Optionally let you constrain by category (politics, sports, econ) or by a watchlist.
-
-  This is the single highest-leverage improvement to actual profitability: the arb and MM strategies
-  are only as good as the markets you point them at, and right now you're pointing them at an
-  unfiltered list that may include dead markets.
-
-  It's not yet a line item in Roadmap.md — it should be, near the top. Want me to build the
-  universe-curation layer next (liquidity/volume-filtered, volume-ranked, periodically refreshed)?
-  It's a clean, testable addition that makes everything downstream — arb, market-making, your
-  daily-goal odds — materially better, and it's a prerequisite before live money. I'd put it ahead of
-  persistence.
+Flow: **curate the universe (liquid, tradeable) → strategies pick by edge/spread
+→ risk bounds exposure.**

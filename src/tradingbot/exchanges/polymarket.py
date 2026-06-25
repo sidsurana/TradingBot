@@ -12,6 +12,7 @@ Order placement raises until wallet signing (py-clob-client / EIP-712) is wired.
 from __future__ import annotations
 
 import asyncio
+import json
 from decimal import Decimal
 
 import httpx
@@ -31,6 +32,42 @@ from tradingbot.models import (
 )
 
 log = structlog.get_logger(__name__)
+
+# Gamma is Polymarket's market-metadata API. Unlike the CLOB /markets endpoint
+# (which returns mostly closed markets under active=true), Gamma lets us filter
+# to genuinely tradeable markets and sort by 24h volume.
+GAMMA_URL = "https://gamma-api.polymarket.com/markets"
+
+
+def parse_gamma_markets(data: list, venue: Venue, event_filter: str | None = None) -> list[Market]:
+    """Turn Gamma market objects into tradeable Market legs, carrying 24h volume
+    and category in metadata for the universe selector. Pure (no network)."""
+    out: list[Market] = []
+    for m in data:
+        question = m.get("question", "")
+        if event_filter and event_filter.lower() not in question.lower():
+            continue
+        ids = m.get("clobTokenIds")
+        outcomes = m.get("outcomes")
+        try:
+            ids = json.loads(ids) if isinstance(ids, str) else (ids or [])
+            outcomes = json.loads(outcomes) if isinstance(outcomes, str) else (outcomes or [])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not ids:
+            continue
+        condition = m.get("conditionId") or m.get("condition_id") or ""
+        volume = float(m.get("volume24hr") or m.get("volume") or 0)
+        category = (m.get("category") or "").lower()
+        tick = float(m.get("orderPriceMinTickSize") or m.get("minimum_tick_size") or 0.01)
+        for i, token_id in enumerate(ids):
+            outcome = outcomes[i] if i < len(outcomes) else "YES"
+            out.append(Market(
+                venue=venue, market_id=str(token_id), event_id=condition or str(token_id),
+                title=question or condition, outcome=str(outcome), tick_size=tick,
+                metadata={"volume": volume, "category": category},
+            ))
+    return out
 
 
 class PolymarketExchange(Exchange):
@@ -73,27 +110,13 @@ class PolymarketExchange(Exchange):
 
     async def list_markets(self, *, event_filter: str | None = None) -> list[Market]:
         assert self._client is not None, "connect() first"
-        resp = await self._client.get("/markets", params={"active": "true"})
+        # Gamma, server-side filtered to tradeable markets, sorted by 24h volume.
+        resp = await self._client.get(GAMMA_URL, params={
+            "active": "true", "closed": "false", "archived": "false",
+            "order": "volume24hr", "ascending": "false", "limit": 300,
+        })
         resp.raise_for_status()
-        out: list[Market] = []
-        for m in resp.json().get("data", []):
-            if event_filter and event_filter not in m.get("question", ""):
-                continue
-            condition_id = m.get("condition_id", "")
-            for tok in m.get("tokens", []):
-                out.append(
-                    Market(
-                        venue=self.venue,
-                        market_id=tok["token_id"],
-                        event_id=condition_id,
-                        title=m.get("question", condition_id),
-                        outcome=tok.get("outcome", "YES"),
-                        tick_size=float(m.get("minimum_tick_size", 0.01)),
-                        min_size=Decimal(str(m.get("minimum_order_size", 1))),
-                        metadata={"raw": m},
-                    )
-                )
-        return out
+        return parse_gamma_markets(resp.json(), self.venue, event_filter)
 
     async def fetch_order_book(self, market: Market, depth: int = 10) -> OrderBook:
         assert self._client is not None, "connect() first"

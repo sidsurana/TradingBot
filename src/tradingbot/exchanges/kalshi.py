@@ -45,6 +45,28 @@ _STATUS = {
 }
 
 
+def parse_kalshi_markets(markets: list, venue: Venue) -> list[Market]:
+    """Turn Kalshi market objects into Market legs, carrying 24h volume and
+    category in metadata for the universe selector. Pure (no network)."""
+    out: list[Market] = []
+    for m in markets:
+        out.append(Market(
+            venue=venue,
+            market_id=m["ticker"],
+            event_id=m.get("event_ticker", m["ticker"]),
+            title=m.get("title", m["ticker"]),
+            outcome="YES",
+            tick_size=0.01,
+            min_size=Decimal(1),
+            metadata={
+                "volume": float(m.get("volume") or 0),
+                "category": (m.get("category") or "").lower(),
+                "raw": m,
+            },
+        ))
+    return out
+
+
 def cents_to_prob(cents: int) -> float:
     return cents / 100.0
 
@@ -82,22 +104,7 @@ class KalshiExchange(Exchange):
             params["series_ticker"] = event_filter
         resp = await self._client.get("/trade-api/v2/markets", params=params)
         resp.raise_for_status()
-        out: list[Market] = []
-        for m in resp.json().get("markets", []):
-            out.append(
-                Market(
-                    venue=self.venue,
-                    market_id=m["ticker"],
-                    event_id=m.get("event_ticker", m["ticker"]),
-                    title=m.get("title", m["ticker"]),
-                    outcome="YES",
-                    close_time=None,
-                    tick_size=0.01,
-                    min_size=Decimal(1),
-                    metadata={"raw": m},
-                )
-            )
-        return out
+        return parse_kalshi_markets(resp.json().get("markets", []), self.venue)
 
     async def fetch_order_book(self, market: Market, depth: int = 10) -> OrderBook:
         assert self._client is not None, "connect() first"
