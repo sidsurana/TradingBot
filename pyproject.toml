@@ -1,0 +1,42 @@
+[project]
+name = "tradingbot"
+version = "0.1.0"
+description = "Autonomous multi-strategy prediction-markets trading bot (Kalshi + Polymarket)"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",          # async HTTP for exchange REST APIs
+    "websockets>=12.0",     # streaming market data
+    "pydantic>=2.7",        # config + model validation
+    "pydantic-settings>=2.3",
+    "python-dotenv>=1.0",
+    "structlog>=24.1",      # structured logging for an unattended process
+    "tenacity>=8.3",        # retry/backoff on flaky network calls
+]
+
+[project.optional-dependencies]
+signal = ["pandas>=2.2", "numpy>=1.26", "scikit-learn>=1.5"]
+agent = ["anthropic>=0.49"]          # Claude brain (Telegram uses the core httpx dep)
+live = ["cryptography>=42.0",        # Kalshi RSA request signing
+        "py-clob-client>=0.17"]      # Polymarket EIP-712 order signing
+serve = ["fastapi>=0.110", "uvicorn>=0.29"]  # HTTP control API for external agents
+dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10",
+       "cryptography>=42.0",         # so the Kalshi signing test runs
+       "fastapi>=0.110", "httpx>=0.27"]  # so the control-API test runs
+
+[project.scripts]
+tradingbot = "tradingbot.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tradingbot"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

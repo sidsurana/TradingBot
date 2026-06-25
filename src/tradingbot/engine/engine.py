@@ -1,0 +1,338 @@
+"""Engine — the autonomous event loop.
+
+Each tick:
+  1. Refresh order books for the tracked market universe.
+  2. Build a read-only Context and run every enabled strategy.
+  3. Pass each desired order through the risk manager.
+  4. Execute approved orders (paper sim or live venue).
+  5. Drain resulting fills into the portfolio; update the kill-switch.
+
+The loop is defensive: a strategy or venue exception is logged and the tick
+continues. It runs until cancelled (Ctrl-C / SIGTERM).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+
+import structlog
+
+from tradingbot.config import Settings
+from tradingbot.engine.exits import ExitManager
+from tradingbot.engine.goals import GoalTracker
+from tradingbot.engine.portfolio import Portfolio
+from tradingbot.engine.risk import RiskManager
+from tradingbot.engine.router import ExchangeRouter
+from tradingbot.exchanges.base import Exchange
+from tradingbot.exchanges.paper import PaperExchange
+from tradingbot.models import Fill, Market, OrderBook, OrderStatus
+from tradingbot.strategies.base import Context, Strategy
+
+log = structlog.get_logger(__name__)
+
+
+class Engine:
+    def __init__(
+        self,
+        settings: Settings,
+        router: ExchangeRouter,
+        strategies: list[Strategy],
+        stream=None,
+    ):
+        self.settings = settings
+        self.router = router
+        self.strategies = strategies
+        self.stream = stream   # optional StreamManager for WebSocket books
+        self.portfolio = Portfolio(settings.paper_starting_cash)
+        self.risk = RiskManager(settings.risk, self.portfolio)
+        self.goals = GoalTracker(settings.goals)
+        self.exits = ExitManager(settings.exits)
+        self._locked_day = ""        # day on which lock-gains already fired
+        self._paused_by_goals = False
+
+        # In paper mode the execution layer simulates fills; in live mode the
+        # router places real orders on the venues.
+        self.exec: Exchange
+        self._paper: PaperExchange | None = None
+        if settings.live:
+            self.exec = router
+            log.warning("engine.LIVE_MODE", msg="real orders will be placed")
+        else:
+            self._paper = PaperExchange(router)
+            self.exec = self._paper
+            log.info("engine.paper_mode", starting_cash=str(settings.paper_starting_cash))
+
+        # Paper fills simulate against the live stream cache (no REST per order).
+        if self._paper is not None and self.stream is not None:
+            self._paper.set_book_source(lambda m: self.stream.book(m.key))
+
+        self.markets: list[Market] = []
+        self._fill_cursor = 0
+        self._stop = asyncio.Event()
+        self._trade_lock = asyncio.Lock()  # serializes the periodic loop vs the reactor
+        self.paused = False          # agent/operator can halt order placement live
+        self.last_books: dict[str, OrderBook] = {}  # latest snapshot, for introspection
+        self.manual_orders: list = []  # discretionary orders queued by the agent/operator
+        self._quotes: dict[tuple, object] = {}  # (market_key, side) -> live MM resting quote
+
+    async def discover(self, event_filter: str | None = None, limit: int = 200) -> None:
+        self.markets = (await self.router.list_markets(event_filter=event_filter))[:limit]
+        log.info("engine.universe", count=len(self.markets))
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    async def run(self) -> None:
+        if not self.markets:
+            await self.discover()
+        reactor_task = None
+        if self.stream is not None:
+            await self.stream.start(self.markets)
+            if self.settings.streaming.event_driven:
+                reactor_task = asyncio.create_task(self._reactor())
+                log.info("engine.event_driven", debounce_s=self.settings.streaming.react_debounce_s)
+        try:
+            while not self._stop.is_set():
+                await self._tick()
+                # When streaming, reads are in-memory so we tick fast (act on
+                # edges in ~250ms instead of waiting on the REST cadence).
+                interval = (
+                    self.settings.streaming.loop_interval_s
+                    if (self.stream is not None and self.stream.active)
+                    else self.settings.loop_interval_s
+                )
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if reactor_task is not None:
+                reactor_task.cancel()
+                try:
+                    await reactor_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            if self.stream is not None:
+                await self.stream.stop()
+            log.info("engine.stopped",
+                     session_pnl=str(round(self.portfolio.session_pnl({}), 4)))
+
+    async def _tick(self) -> None:
+        """Periodic loop (backstop + slow path): risk, goals/lock-gains, exits,
+        manual orders, a FULL strategy + quote pass, and fill draining. Runs even
+        without streaming; with streaming the reactor handles the fast entry and
+        this is the heartbeat that catches anything missed."""
+        books = await self._refresh_books()
+        async with self._trade_lock:
+            self.last_books = books
+            # Fill any resting market-maker quotes the fresh books traded through.
+            if self._paper is not None:
+                self._paper.match_resting(books)
+            self.risk.update_kill_switch(books)
+
+            # Goal tracking + lock-gains: once today's profit target is hit, stop
+            # opening new risk for the rest of the day (if enabled).
+            equity = self.portfolio.equity(books)
+            self.goals.update(equity)
+            if self.settings.goals.lock_gains and self.goals.enabled:
+                day = self.goals.day_key
+                # New day rolled over: release a lock we set yesterday.
+                if self._paused_by_goals and self._locked_day and self._locked_day != day:
+                    self.paused = False
+                    self._paused_by_goals = False
+                    self._locked_day = ""
+                    log.info("goals.new_day_unlock", day=day)
+                prog = self.goals.progress(equity)
+                if prog["daily_target_met"] and self._locked_day != day:
+                    self._locked_day = day
+                    self.paused = True
+                    self._paused_by_goals = True
+                    log.info("goals.daily_target_met_locking_gains",
+                             day=day, equity=str(round(equity, 2)))
+
+            # Risk exits (stop-loss / take-profit) ALWAYS run — even while paused,
+            # so a locked-gains or operator pause never strands a losing position.
+            await self._place_orders(self.exits.evaluate(self.portfolio.positions, books), books)
+
+            # Discretionary orders queued by the agent/operator ALSO run regardless
+            # of pause — an explicit "buy X" is intentional and should execute now.
+            if self.manual_orders:
+                queued, self.manual_orders = self.manual_orders, []
+                await self._place_orders(queued, books)
+
+            # Paused: keep data flowing (marks stay fresh) and keep exits live, but
+            # open no new strategy positions and pull all quotes.
+            if not self.paused:
+                await self._run_strategies(books)
+                await self._reconcile_quotes(Context(self.markets, books, self.portfolio.positions),
+                                             books)
+            else:
+                await self._cancel_all_quotes()
+
+            self._drain_fills()
+
+    async def _on_update(self, dirty: set[str]) -> None:
+        """Event-driven fast path: react the instant books change. Evaluates
+        strategies and refreshes the dirty markets' quotes immediately, instead of
+        waiting for the next loop. Shares the trade lock with the periodic tick."""
+        async with self._trade_lock:
+            if self.paused or self.risk.kill_switch:
+                return
+            books = self._books_from_stream()
+            if not books:
+                return
+            self.last_books = books
+            if self._paper is not None:
+                self._paper.match_resting(books)
+            await self._run_strategies(books)
+            await self._reconcile_quotes(Context(self.markets, books, self.portfolio.positions),
+                                         books, only_keys=dirty)
+            self._drain_fills()
+
+    async def _run_strategies(self, books: dict[str, OrderBook]) -> None:
+        ctx = Context(self.markets, books, self.portfolio.positions)
+        desired = []
+        for strat in self.strategies:
+            try:
+                desired += strat.generate(ctx)
+            except Exception as exc:  # noqa: BLE001
+                log.error("strategy.error", strategy=strat.name, error=str(exc))
+        await self._place_orders(desired, books)
+
+    def _books_from_stream(self) -> dict[str, OrderBook]:
+        books: dict[str, OrderBook] = {}
+        if self.stream is None:
+            return books
+        for m in self.markets:
+            b = self.stream.book(m.key)
+            if b is not None and (b.best_bid or b.best_ask):
+                books[m.key] = b
+        return books
+
+    async def _reactor(self) -> None:
+        """Waits on stream updates and fires the fast path, debounced to coalesce
+        bursts. The periodic loop continues independently as the backstop."""
+        debounce = self.settings.streaming.react_debounce_s
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self.stream.updated.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            self.stream.updated.clear()
+            if debounce > 0:
+                await asyncio.sleep(debounce)
+            dirty = self.stream.drain_dirty()
+            if not dirty:
+                continue
+            try:
+                await self._on_update(dirty)
+            except Exception as exc:  # noqa: BLE001
+                log.error("reactor.error", error=str(exc))
+
+    async def _reconcile_quotes(self, ctx: Context, books: dict[str, OrderBook],
+                                only_keys: set[str] | None = None) -> None:
+        """Maintain market-maker resting quotes: place new ones, and cancel/replace
+        any whose target price moved or that already filled. When `only_keys` is
+        given (the reactor's dirty markets), only those markets are touched."""
+        desired: dict[tuple, "object"] = {}
+        for strat in self.strategies:
+            if not getattr(strat, "is_market_maker", False):
+                continue
+            try:
+                for o in strat.quotes(ctx):
+                    if only_keys is not None and o.market.key not in only_keys:
+                        continue
+                    desired[(o.market.key, o.side)] = o
+            except Exception as exc:  # noqa: BLE001
+                log.error("strategy.error", strategy=strat.name, error=str(exc))
+
+        # Cancel quotes that filled, vanished from the target set, or moved price.
+        for key, order in list(self._quotes.items()):
+            if only_keys is not None and key[0] not in only_keys:
+                continue
+            want = desired.get(key)
+            if order.is_terminal or want is None or want.price != order.price:
+                if not order.is_terminal:
+                    try:
+                        await self.exec.cancel_order(order)
+                    except Exception:  # noqa: BLE001
+                        pass
+                del self._quotes[key]
+
+        # Place quotes we want but don't yet have resting.
+        for key, o in desired.items():
+            if key in self._quotes:
+                continue
+            if not self.risk.approve(o, books):
+                continue
+            try:
+                await self.exec.place_order(o)
+                if not o.is_terminal:
+                    self._quotes[key] = o
+            except NotImplementedError as exc:
+                log.error("order.unsupported", market=o.market.key, error=str(exc))
+            except Exception as exc:  # noqa: BLE001
+                log.error("order.error", market=o.market.key, error=str(exc))
+
+    async def _cancel_all_quotes(self) -> None:
+        for order in list(self._quotes.values()):
+            if not order.is_terminal:
+                try:
+                    await self.exec.cancel_order(order)
+                except Exception:  # noqa: BLE001
+                    pass
+        self._quotes.clear()
+
+    async def _place_orders(self, orders: list, books: dict[str, OrderBook]) -> None:
+        for order in orders:
+            if not self.risk.approve(order, books):
+                continue
+            try:
+                await self.exec.place_order(order)
+                if order.status is OrderStatus.REJECTED:
+                    log.warning("order.rejected", market=order.market.key, reason=order.reason)
+            except NotImplementedError as exc:
+                log.error("order.unsupported", market=order.market.key, error=str(exc))
+            except Exception as exc:  # noqa: BLE001
+                log.error("order.error", market=order.market.key, error=str(exc))
+
+    async def _refresh_books(self) -> dict[str, OrderBook]:
+        # Streaming path: read live books from the WS cache (instant). REST-fill
+        # only markets not yet warmed up, capped to avoid rate limits.
+        if self.stream is not None and self.stream.active:
+            books: dict[str, OrderBook] = {}
+            missing = []
+            for m in self.markets:
+                b = self.stream.book(m.key)
+                if b is not None and (b.best_bid or b.best_ask):
+                    books[m.key] = b
+                else:
+                    missing.append(m)
+            for m in missing[: self.settings.streaming.rest_fallback_cap]:
+                try:
+                    books[m.key] = await self.router.fetch_order_book(m)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("book.error", market=m.key, error=str(exc))
+            return books
+
+        # Pure REST path.
+        books = {}
+        for m in self.markets:
+            try:
+                books[m.key] = await self.router.fetch_order_book(m)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("book.error", market=m.key, error=str(exc))
+        return books
+
+    def _drain_fills(self) -> None:
+        """Move new simulated fills into the portfolio (paper mode)."""
+        if self._paper is None:
+            return  # live fill reconciliation is a separate concern (venue polling)
+        new = self._paper.fills[self._fill_cursor :]
+        self._fill_cursor = len(self._paper.fills)
+        market_by_key = {m.key: m for m in self.markets}
+        for fill in new:
+            market = market_by_key.get(fill.market_key)
+            if market is not None:
+                self.portfolio.record_fill(market, fill)
