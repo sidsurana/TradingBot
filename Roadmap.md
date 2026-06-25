@@ -22,6 +22,7 @@ See `Logic.md` for how each shipped piece works, `SETUP.md` to run it.
 | 8 | Claude agent (Telegram) + Quant skills | supervisor + analysis |
 | 9 | Agent discretionary trades (`place_order`) | confirmation-gated |
 | 10 | HTTP control API + LangGraph agent | bot is LLM-free; agent on-demand |
+| 10b | Multi-agent supervisor (research / risk / execution / portfolio) | LangGraph agents-as-tools; SQLite checkpointer; deployable |
 | 11 | Autopilot (reassess + briefings) | advisory only |
 | 12 | WebSocket streaming — Polymarket | **live-validated, ~40 ms push** |
 | 13 | Event-driven acting | **live-validated, ~11 ms react; edge→fill ~100–200 ms** |

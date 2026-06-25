@@ -1,49 +1,58 @@
-"""The permanent TradingBot agent, as a LangGraph graph.
+"""The permanent TradingBot agent — a multi-agent supervisor.
 
-A ReAct agent (Claude + the HTTP tools in tools.py) that supervises the bot:
-answers questions about PnL/risk/goals, runs Quant analyses, and takes gated
-actions. Deploy it on LangGraph Platform (or run `langgraph dev` locally) so it
-persists and is invoked on demand — the bot itself never calls a model, so you
-only pay for tokens when you actually talk to this agent.
+A supervisor ReAct agent delegates to four specialist agents (research/quant,
+risk, execution, portfolio reporter), each wrapped as a tool. The supervisor
+decides who handles a request, can chain them (e.g. research -> risk -> execute),
+and synthesizes the final reply. Specialists are defined in specialists.py.
 
-The exported `graph` object is what langgraph.json points at.
+Deploy on LangGraph Platform (which provides persistence) by pointing
+langgraph.json at the exported `graph`. To run it yourself with persistent
+threads, use run_local.py, which compiles the same graph with a SqliteSaver.
 """
 
 from __future__ import annotations
 
-import os
-
 from langchain_anthropic import ChatAnthropic
 from langgraph.prebuilt import create_react_agent
 
-try:  # works both as a package and as a flat LangGraph project dir
-    from .tools import TOOLS
+try:  # works as a package and as a flat LangGraph project dir
+    from .specialists import MODEL, SPECIALISTS
 except ImportError:  # pragma: no cover
-    from tools import TOOLS
+    from specialists import MODEL, SPECIALISTS
 
-SYSTEM_PROMPT = """\
-You are the permanent supervising agent for an autonomous prediction-markets
-trading bot (Kalshi + Polymarket). You talk to the operator and act through
-tools that call the bot's control API. Be concise and direct.
+SUPERVISOR_PROMPT = """\
+You are the supervising agent for an autonomous prediction-markets trading bot
+(Kalshi + Polymarket). You coordinate a desk of specialists by delegating to
+them as tools; you do not call the bot's API directly.
 
-How you work:
-- Use the read tools (get_portfolio, get_positions, get_risk, get_goals,
-  get_markets) for any question about money, risk, or goals. Never guess numbers.
-- For analysis, call run_quant_analysis(skill_name) — it returns a prompt
-  pre-filled with live state; reason over it and give the answer in your reply.
-- The bot defaults to PAPER trading. set_risk_limit, deploy_capital, go_live, and
-  trip_kill_switch are SENSITIVE: they return a confirmation token + summary.
-  Relay the summary, ask the operator to confirm, and only then call
-  confirm_action(token). Never confirm on your own.
-- Factor goal pace into advice: behind pace -> what would help; daily target met
-  -> note that lock-gains may have paused trading.
-Prices are probabilities in [0,1]; quote amounts in dollars."""
+Delegate by intent:
+- research_agent — analysis: regime, alpha/edges, strategy ideas, drawdown,
+  positions review.
+- risk_agent — exposure, distance to the kill-switch, risk-limit changes.
+- execution_agent — pause/resume, placing a specific order, deploying capital,
+  going live.
+- portfolio_agent — read-only PnL / positions / goal-pace check-ins.
 
-# Default to the most capable model. For cheap, frequent check-ins set
-# LANGGRAPH_MODEL=claude-haiku-4-5 to cut cost; raise to claude-opus-4-8 for
-# deep analysis. (Anthropic SDK key comes from ANTHROPIC_API_KEY.)
-MODEL = os.getenv("LANGGRAPH_MODEL", "claude-opus-4-8")
+You may chain them (e.g. ask research for a read, then risk to size it, then
+execution to act). Sensitive actions (limit changes, capital, go-live,
+kill-switch) come back from a specialist with a confirmation summary — relay it
+to the operator, get an explicit "yes", then tell the specialist to confirm.
+Never confirm on the operator's behalf. Be concise; these are phone messages —
+lead with the answer."""
 
-model = ChatAnthropic(model=MODEL, max_tokens=4000)
 
-graph = create_react_agent(model, TOOLS, prompt=SYSTEM_PROMPT)
+def build_supervisor(checkpointer=None):
+    """Build the supervisor graph. Pass a checkpointer (e.g. SqliteSaver) for
+    persistent threads when self-hosting; leave None for LangGraph Platform,
+    which injects its own persistence."""
+    return create_react_agent(
+        ChatAnthropic(model=MODEL, max_tokens=4000),
+        SPECIALISTS,
+        prompt=SUPERVISOR_PROMPT,
+        checkpointer=checkpointer,
+    )
+
+
+# Exported for langgraph.json / LangGraph Platform (no explicit checkpointer —
+# the platform provides persistence).
+graph = build_supervisor()

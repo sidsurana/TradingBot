@@ -1,14 +1,29 @@
-# TradingBot LangGraph Agent
+# TradingBot LangGraph Agent (multi-agent supervisor)
 
-The **permanent supervising agent** for the trading bot, as a LangGraph graph.
-It's the only component that calls an LLM — the bot itself runs LLM-free, so
-keeping it on 24/7 costs nothing in model tokens. You pay only when you talk to
-this agent.
+The **permanent agent system** for the trading bot. A **supervisor** delegates to
+four specialist agents — a trading desk — each with a scoped tool set. It's the
+only component that calls an LLM; the bot itself runs LLM-free, so keeping it on
+24/7 costs nothing in model tokens. You pay only when you talk to this agent.
 
 ```
-  You ──▶ LangGraph agent (Claude + tools) ──HTTP──▶ Bot control API ──▶ engine
-          (the only thing that calls a model)        (LLM-free, always on)
+                         ┌── research_agent   (regime / alpha / strategy / drawdown)
+  You ──▶ Supervisor ────┼── risk_agent       (exposure, limits, kill-switch)
+          (routes +      ├── execution_agent  (pause/resume, place order, deploy, go-live)
+           synthesizes)  └── portfolio_agent  (read-only PnL / positions / goal pace)
+                                   │
+                                   └──HTTP──▶ Bot control API ──▶ engine (LLM-free, always on)
 ```
+
+Each specialist (`specialists.py`) is a ReAct agent wrapped as a tool the
+supervisor (`graph.py`) calls — so the supervisor can chain them (research → risk
+→ execute) and the roles stay separated (the reporter can't trade; the risk agent
+can't place orders). Sensitive actions (limit changes, capital, go-live,
+kill-switch) are staged with a confirmation token and surfaced to you for an
+explicit "yes" before they execute.
+
+**Memory:** threads persist via a SQLite checkpointer when self-hosting
+(`run_local.py`); on LangGraph Platform the platform provides persistence (the
+exported `graph` omits the checkpointer by design).
 
 ## Why this design (the cost answer)
 
@@ -51,11 +66,16 @@ cd langgraph_agent
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt "langgraph-cli[inmem]"
 cp .env.example .env              # fill ANTHROPIC_API_KEY + TRADINGBOT_API_TOKEN
-langgraph dev                     # opens LangGraph Studio; chat with the agent
+
+langgraph dev                     # LangGraph Studio — watch the supervisor route
+# or, a persistent-thread REPL (SqliteSaver):
+python run_local.py
 ```
 
-Ask it: *"what's my PnL?"*, *"how am I tracking to my daily goal?"*,
-*"run regime detection"*, *"deploy $200"* (it stages + asks you to confirm).
+Ask it: *"what's my PnL?"* (→ portfolio_agent), *"how am I tracking to my daily
+goal?"*, *"is my book too concentrated?"* (→ risk_agent), *"run regime
+detection"* (→ research_agent), *"deploy $200"* (→ execution_agent; it stages +
+asks you to confirm). The supervisor picks the specialist(s) and can chain them.
 
 ## 3. Deploy it permanently (LangGraph Platform)
 
@@ -78,8 +98,10 @@ from anything (a cron, a webhook, a phone shortcut). That's your permanent brain
 
 | File | What it is |
 |---|---|
-| `graph.py` | The ReAct agent graph (`graph` is the deployed object). |
+| `graph.py` | The **supervisor** graph (`graph` is the deployed object); `build_supervisor(checkpointer=)`. |
+| `specialists.py` | The four specialist ReAct agents, each wrapped as a delegation tool. |
 | `tools.py` | LangChain tools — thin HTTP calls to the bot's control API. |
+| `run_local.py` | Self-host REPL with a SQLite checkpointer (persistent threads). |
 | `langgraph.json` | Deployment manifest (graph path, deps, env). |
 | `requirements.txt` | Agent dependencies. |
 | `.env.example` | Env template. |
