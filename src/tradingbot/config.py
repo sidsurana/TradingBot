@@ -116,6 +116,22 @@ class AutopilotSettings(BaseSettings):
     briefing: bool = True                 # push an agent briefing to Telegram each cycle
 
 
+class LinkSettings(BaseSettings):
+    """Cross-venue event mapping. Cross-venue arbitrage needs to know that, say,
+    a Kalshi market and a Polymarket token resolve to the SAME real outcome —
+    their native ids never match, so the link must be declared. Explicit (not
+    fuzzy) by design: a wrong link trades two unrelated markets as equivalent, so
+    these are user-curated and trusted.
+
+    Each link group: {"link_id": "...", "members": [{"venue": "...", "market_id": "..."}, ...]}.
+    Provide inline via `links` or as a JSON file at `map_path`."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_LINK_")
+
+    map_path: str = ""                                   # JSON file of link groups
+    links: list[dict] = Field(default_factory=list)      # inline link groups
+
+
 class UniverseSettings(BaseSettings):
     """Which markets the bot tracks ("universe curation"). Discovery filters to
     genuinely tradeable, liquid markets, ranks by volume, caps per venue, and
@@ -199,6 +215,7 @@ class Settings(BaseSettings):
     enabled_strategies: list[str] = Field(default_factory=lambda: ["arbitrage"])
 
     universe: UniverseSettings = Field(default_factory=UniverseSettings)
+    links: LinkSettings = Field(default_factory=LinkSettings)
     risk: RiskLimits = Field(default_factory=RiskLimits)
     exits: ExitSettings = Field(default_factory=ExitSettings)
     market_maker: MarketMakerSettings = Field(default_factory=MarketMakerSettings)

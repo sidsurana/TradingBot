@@ -28,6 +28,7 @@ See `Logic.md` for how each shipped piece works, `SETUP.md` to run it.
 | 14 | Kalshi live order signing (RSA) | signing tested |
 | 15 | Universe curation (tradeable filter + volume rank + periodic refresh) | **live-validated**; Polymarket via Gamma API, Kalshi by volume |
 | 16 | Persistence — event-sourced fills in SQLite | positions/cash/goals survive restart via replay; market registry so exits always resolve |
+| 17 | Cross-venue event-mapping (linker) | user-curated link_id makes cross-venue arb actually fire (native ids never match) |
 
 ---
 
@@ -49,9 +50,9 @@ can't be confirmed without a live account.
 
 | # | Item | Why | Effort |
 |---|---|---|---|
-| 17 | **Cross-venue event-mapping table** | Today cross-venue arb relies on a shared `event_id`, which never matches across venues — so cross-venue arb effectively can't fire. A real mapping (the same World Cup match on Kalshi *and* Polymarket) makes it work and unlocks far more arb | M |
 | 18 | **Signal / model strategy** | Turn the agent's `regime`/`alpha` Quant skills into live directional positions (sized fractional-Kelly, protected by stop-loss) — the third strategy | M–L |
-| 19 | **Per-fill venue reconciliation (live)** | In live mode, reconcile our portfolio against venue-reported positions/fills each tick (paper drains locally today) | M |
+| 19 | **Link auto-suggester (advisory)** | Fuzzy-match titles/outcomes across venues to *suggest* `link_id` groups for the user to confirm — speeds up building the cross-venue mapping (never auto-trades) | M |
+| 20 | **Per-fill venue reconciliation (live)** | In live mode, reconcile our portfolio against venue-reported positions/fills each tick (paper drains locally today) | M |
 
 ---
 

@@ -84,26 +84,30 @@ class ArbitrageStrategy(Strategy):
 
     # --- flavor 2: same outcome, two venues --------------------------------
     def _cross_venue(self, ctx: Context) -> list[Order]:
-        # Group markets that settle on the same real-world outcome. We key on
-        # (event_id, outcome); adapters should set a shared event_id for linked
-        # markets (a mapping table is the production-grade version of this).
-        groups: dict[tuple[str, str], list[Market]] = defaultdict(list)
+        # Group markets that settle on the same real-world outcome. Prefer the
+        # cross-venue `link_id` stamped by the EventLinker (the production path,
+        # since venues' native ids never match); fall back to (event_id, outcome)
+        # for same-venue groups and tests that share an event_id.
+        groups: dict[str, list[Market]] = defaultdict(list)
         for m in ctx.markets:
-            groups[(m.event_id, m.outcome)].append(m)
+            key = m.metadata.get("link_id") or f"{m.event_id}|{m.outcome.lower()}"
+            groups[key].append(m)
 
         out: list[Order] = []
-        for (event_id, outcome), markets in groups.items():
+        for key, markets in groups.items():
             if len(markets) < 2:
                 continue
             for i, buy_m in enumerate(markets):
                 for sell_m in markets[i + 1 :]:
-                    out += self._maybe_pair(ctx, buy_m, sell_m, event_id, outcome)
-                    out += self._maybe_pair(ctx, sell_m, buy_m, event_id, outcome)
+                    out += self._maybe_pair(ctx, buy_m, sell_m, key)
+                    out += self._maybe_pair(ctx, sell_m, buy_m, key)
         return out
 
     def _maybe_pair(
-        self, ctx: Context, buy_m: Market, sell_m: Market, event_id: str, outcome: str
+        self, ctx: Context, buy_m: Market, sell_m: Market, group_key: str
     ) -> list[Order]:
+        if buy_m.venue is sell_m.venue:
+            return []  # cross-venue only; same-venue equivalents aren't an arb here
         bb, sb = ctx.book(buy_m), ctx.book(sell_m)
         if not bb or not sb or not bb.best_ask or not sb.best_bid:
             return []
@@ -113,7 +117,7 @@ class ArbitrageStrategy(Strategy):
         size = min(bb.best_ask.size, sb.best_bid.size, self.max_size)
         if size <= 0:
             return []
-        log.info("arb.cross_venue", event_id=event_id, outcome=outcome,
+        log.info("arb.cross_venue", group=group_key,
                  buy=buy_m.venue.value, sell=sell_m.venue.value, edge=round(edge, 4))
         reason = f"cross_venue {buy_m.venue.value}->{sell_m.venue.value} edge={edge:.3f}"
         return [

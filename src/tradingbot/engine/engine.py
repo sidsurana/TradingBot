@@ -24,6 +24,7 @@ from tradingbot.engine.goals import GoalTracker
 from tradingbot.engine.portfolio import Portfolio
 from tradingbot.engine.risk import RiskManager
 from tradingbot.engine.router import ExchangeRouter
+from tradingbot.engine.linker import EventLinker
 from tradingbot.engine.universe import UniverseSelector
 from tradingbot.exchanges.base import Exchange
 from tradingbot.exchanges.paper import PaperExchange
@@ -50,6 +51,7 @@ class Engine:
         self.goals = GoalTracker(settings.goals)
         self.exits = ExitManager(settings.exits)
         self.universe = UniverseSelector(settings.universe)
+        self.linker = EventLinker(settings.links)
         self._locked_day = ""        # day on which lock-gains already fired
         self._paused_by_goals = False
 
@@ -102,9 +104,11 @@ class Engine:
         selected = self.universe.select(raw)
         if limit is not None:
             selected = selected[:limit]
+        self.linker.annotate(selected)   # stamp cross-venue link_ids for arbitrage
         self.markets = selected
         self._market_registry.update({m.key: m for m in selected})
-        log.info("engine.universe", discovered=len(raw), tracked=len(self.markets))
+        log.info("engine.universe", discovered=len(raw), tracked=len(self.markets),
+                 cross_venue_links=self.linker.count)
 
     def stop(self) -> None:
         self._stop.set()

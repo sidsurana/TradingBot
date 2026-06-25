@@ -185,9 +185,13 @@ edge = best_bid(B) − best_ask(A)
 trade if edge ≥ min_edge, size = min(ask_size_A, bid_size_B, max_size)
 ```
 
-The `min_edge` buffer absorbs fees + slippage so only real edges trade. Today
-cross-venue linkage uses a shared `event_id`; a production **event-mapping
-table** (roadmap) will link the same real event across venues robustly.
+The `min_edge` buffer absorbs fees + slippage so only real edges trade.
+Cross-venue linkage uses the **event-mapping table** (`engine/linker.py`): venues'
+native ids never match, so a user-curated `link_id` declares which Kalshi market
+and Polymarket token resolve identically; the strategy groups by `link_id` (and
+falls back to `event_id`+outcome for same-venue groups). Links are explicit, not
+fuzzy — a wrong link would trade unrelated markets as equivalent. Configure via
+`TB_LINK_*` (inline groups or a JSON `map_path`).
 
 ### 4b. Market-making **[implemented]**
 
