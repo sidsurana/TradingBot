@@ -65,6 +65,18 @@ def _tool_defs() -> list[dict]:
         {"name": "get_goal_progress",
          "description": "Daily/weekly profit target, current PnL vs target, pace, and whether on track.",
          "input_schema": {"type": "object", "properties": {}}},
+        {"name": "set_market_signal",
+         "description": "Push a directional fair-value view for the signal strategy to act on "
+                        "(when 'signal' is enabled). fair_value/confidence are 0-1. Use after "
+                        "analysis when you have a genuine edge view; the strategy sizes it by Kelly.",
+         "input_schema": {"type": "object", "properties": {
+             "venue": {"type": "string", "enum": ["kalshi", "polymarket"]},
+             "market_id": {"type": "string"},
+             "fair_value": {"type": "number"},
+             "confidence": {"type": "number"}},
+             "required": ["venue", "market_id", "fair_value", "confidence"]}},
+        {"name": "list_signals", "description": "Current directional fair-value signals.",
+         "input_schema": {"type": "object", "properties": {}}},
         {"name": "get_market_snapshot",
          "description": "Most liquid tracked markets (mid, spread, sizes).",
          "input_schema": {"type": "object", "properties": {
@@ -194,6 +206,11 @@ class TradingAgent:
                 return c.risk_status()
             if name == "get_goal_progress":
                 return c.goal_progress()
+            if name == "set_market_signal":
+                return c.set_signal(args["venue"], args["market_id"],
+                                    float(args["fair_value"]), float(args["confidence"]))
+            if name == "list_signals":
+                return c.list_signals()
             if name == "get_market_snapshot":
                 return c.market_snapshot(int(args.get("limit", 25)))
             if name == "pause_trading":

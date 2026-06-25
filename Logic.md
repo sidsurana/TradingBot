@@ -221,12 +221,27 @@ daily target: many small spread captures rather than rare arbitrage windows.
 Knobs: `TB_MM_MIN_SPREAD` (0.02), `TB_MM_QUOTE_SIZE` (10), `TB_MM_MAX_INVENTORY`
 (40), `TB_MM_MAX_MARKETS` (15). Enable with `TB_ENABLED_STRATEGIES=["arbitrage","market_maker"]`.
 
-### 4c. Signal / model-driven **[planned]**
+### 4c. Signal / model-driven **[implemented]**
 
-Take directional positions from a predictive signal. The hook already exists: the
-agent's **Quant skills** (regime, alpha, strategy generation) produce structured
-views; the planned signal strategy will consume those (and external data) to size
-directional bets — then stop-loss / take-profit protect them.
+Takes directional positions from **fair-value views**. The agent's alpha/regime
+skills (or any model) push a signal — "this market's true YES probability is `p`,
+confidence `q`" — into a `SignalStore` (via `set_market_signal` / the `/signals`
+API). The strategy acts when the market price diverges from `p` by at least
+`min_edge`, sizing by **fractional Kelly**:
+
+```
+buy YES at ask c when p > c+edge:   f* = (p − c)/(1 − c)
+sell YES at bid c when p < c−edge:  f* = (c − p)/c
+size_notional = bankroll × kelly_fraction × confidence × f*   (quarter-Kelly default)
+contracts = size_notional / price,  capped at max_position
+```
+
+It builds *toward* the Kelly target (emits only the delta, no churn) and leaves
+exits to the **stop-loss / take-profit ExitManager** (enable `TB_EXIT_*` when
+running it). Signal *generation* (the LLM/model) is decoupled from signal
+*execution* (this strategy), so the view source can be swapped freely. Knobs:
+`TB_SIGNAL_*`. Conservative defaults: quarter-Kelly, 5¢ min edge, 0.5 min
+confidence, $500 bankroll, 50-contract cap.
 
 ---
 

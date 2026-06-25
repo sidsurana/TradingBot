@@ -30,6 +30,7 @@ See `Logic.md` for how each shipped piece works, `SETUP.md` to run it.
 | 15 | Universe curation (tradeable filter + volume rank + periodic refresh) | **live-validated**; Polymarket via Gamma API, Kalshi by volume |
 | 16 | Persistence — event-sourced fills in SQLite | positions/cash/goals survive restart via replay; market registry so exits always resolve |
 | 17 | Cross-venue event-mapping (linker) | user-curated link_id makes cross-venue arb actually fire (native ids never match) |
+| 18 | Signal/model strategy (fractional Kelly) | agent pushes fair-value views; Kelly-sized directional positions; protected by stop-loss exits |
 
 ---
 
@@ -51,9 +52,9 @@ can't be confirmed without a live account.
 
 | # | Item | Why | Effort |
 |---|---|---|---|
-| 18 | **Signal / model strategy** | Turn the agent's `regime`/`alpha` Quant skills into live directional positions (sized fractional-Kelly, protected by stop-loss) — the third strategy | M–L |
 | 19 | **Link auto-suggester (advisory)** | Fuzzy-match titles/outcomes across venues to *suggest* `link_id` groups for the user to confirm — speeds up building the cross-venue mapping (never auto-trades) | M |
 | 20 | **Per-fill venue reconciliation (live)** | In live mode, reconcile our portfolio against venue-reported positions/fills each tick (paper drains locally today) | M |
+| 21 | **Backtesting harness** | Replay historical books through the strategies to tune params (incl. signal Kelly fraction) before risking capital | L |
 
 ---
 

@@ -21,14 +21,16 @@ from langgraph.prebuilt import create_react_agent
 try:  # works as a package and as a flat LangGraph project dir
     from .tools import (
         cancel_action, confirm_action, deploy_capital, get_goals, get_markets,
-        get_portfolio, get_positions, get_risk, go_live, pause_trading, place_order,
-        resume_trading, run_quant_analysis, set_risk_limit, trip_kill_switch,
+        get_portfolio, get_positions, get_risk, go_live, list_signals, pause_trading,
+        place_order, resume_trading, run_quant_analysis, set_market_signal,
+        set_risk_limit, trip_kill_switch,
     )
 except ImportError:  # pragma: no cover
     from tools import (
         cancel_action, confirm_action, deploy_capital, get_goals, get_markets,
-        get_portfolio, get_positions, get_risk, go_live, pause_trading, place_order,
-        resume_trading, run_quant_analysis, set_risk_limit, trip_kill_switch,
+        get_portfolio, get_positions, get_risk, go_live, list_signals, pause_trading,
+        place_order, resume_trading, run_quant_analysis, set_market_signal,
+        set_risk_limit, trip_kill_switch,
     )
 
 # One model, shared by all agents. claude-opus-4-8 by default; set
@@ -46,13 +48,16 @@ READ_TOOLS = [get_portfolio, get_positions, get_risk, get_goals, get_markets]
 
 _research = create_react_agent(
     _model(),
-    READ_TOOLS + [run_quant_analysis],
+    READ_TOOLS + [run_quant_analysis, set_market_signal, list_signals],
     prompt=(
         "You are the Research/Quant analyst for a prediction-markets trading bot. "
         "Use the read tools for live state and run_quant_analysis(skill_name) for "
         "regime_detection, alpha_detection, strategy_generation, drawdown_analysis, "
         "or trade_review. Reason over what it returns and give a concrete, "
-        "quantitative answer. You do NOT trade — you analyze and recommend."
+        "quantitative answer. You do NOT place orders. When you reach a genuine "
+        "fair-value view on a market, you MAY push it with set_market_signal "
+        "(fair_value + confidence, 0-1) — the signal strategy sizes it by Kelly "
+        "within the risk caps. Only signal when you have a real edge view."
     ),
 )
 

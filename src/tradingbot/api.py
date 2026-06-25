@@ -45,6 +45,13 @@ class OrderBody(BaseModel):
     price: float
 
 
+class SignalBody(BaseModel):
+    venue: str
+    market_id: str
+    fair_value: float
+    confidence: float
+
+
 def _skill_context(controller: BotController, capital: str | None, risk: str | None) -> dict:
     ctx = {
         "portfolio": json.dumps(controller.portfolio_summary(), default=str),
@@ -90,6 +97,15 @@ def build_app(controller: BotController, token: str):
     @app.get("/goals", dependencies=Protected)
     def goals() -> dict:
         return controller.goal_progress()
+
+    @app.get("/signals", dependencies=Protected)
+    def signals() -> list:
+        return controller.list_signals()
+
+    @app.post("/signals", dependencies=Protected)
+    def set_signal(body: SignalBody) -> dict:
+        return controller.set_signal(body.venue, body.market_id, body.fair_value,
+                                     body.confidence)
 
     @app.get("/markets", dependencies=Protected)
     def markets(limit: int = 25) -> list:

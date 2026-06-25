@@ -58,6 +58,11 @@ def _build_strategy(name: str, settings: Settings):
         mm = settings.market_maker
         return build(name, min_spread=mm.min_spread, quote_size=mm.quote_size,
                      max_inventory=mm.max_inventory, max_markets=mm.max_markets)
+    if name == "signal":
+        sg = settings.signal
+        return build(name, kelly_fraction=sg.kelly_fraction, bankroll=sg.bankroll,
+                     min_edge=sg.min_edge, min_confidence=sg.min_confidence,
+                     max_signal_age_s=sg.max_signal_age_s, max_position=sg.max_position)
     return build(name)
 
 

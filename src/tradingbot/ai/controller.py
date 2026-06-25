@@ -109,6 +109,29 @@ class BotController:
         prog["enabled"] = self.engine.goals.enabled
         return prog
 
+    def set_signal(self, venue: str, market_id: str, fair_value: float,
+                   confidence: float) -> dict[str, Any]:
+        """Push a directional fair-value view for the signal strategy to act on.
+        Not gated: it's a belief, not a direct order — resulting trades are bounded
+        by the signal strategy's Kelly fraction and the risk caps."""
+        venue = venue.lower()
+        if venue not in {v.value for v in Venue}:
+            return {"ok": False, "error": f"unknown venue {venue!r}"}
+        if not (0.0 <= fair_value <= 1.0):
+            return {"ok": False, "error": "fair_value must be a probability in [0,1]"}
+        if not (0.0 <= confidence <= 1.0):
+            return {"ok": False, "error": "confidence must be in [0,1]"}
+        key = f"{venue}:{market_id}"
+        sig = self.engine.signals.set(key, fair_value, confidence)
+        log.info("controller.signal_set", market=key, fair_value=sig.fair_value,
+                 confidence=sig.confidence)
+        return {"ok": True, "market": key, "fair_value": sig.fair_value,
+                "confidence": sig.confidence}
+
+    def list_signals(self) -> list[dict[str, Any]]:
+        return [{"market": s.market_key, "fair_value": s.fair_value,
+                 "confidence": s.confidence} for s in self.engine.signals.all()]
+
     def market_snapshot(self, limit: int = 25) -> list[dict[str, Any]]:
         """Compact view of the most liquid tracked markets, for skill prompts."""
         rows = []

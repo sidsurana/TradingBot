@@ -160,6 +160,21 @@ class MarketMakerSettings(BaseSettings):
     max_markets: int = 15
 
 
+class SignalSettings(BaseSettings):
+    """Signal/model strategy — takes directional positions from fair-value views
+    (pushed by the agent's alpha/regime skills), sized by fractional Kelly.
+    Conservative by default; protect positions with the stop-loss exits."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_SIGNAL_")
+
+    kelly_fraction: float = 0.25        # fraction of full Kelly (0.25 = quarter-Kelly)
+    bankroll: Decimal = Decimal(500)    # capital allocated to this strategy ($)
+    min_edge: float = 0.05              # require |fair_value - price| >= this to act
+    min_confidence: float = 0.5         # ignore signals below this confidence
+    max_signal_age_s: float = 3600.0    # ignore signals older than this (stale views)
+    max_position: Decimal = Decimal(50)  # hard cap on contracts per market
+
+
 class StreamingSettings(BaseSettings):
     """WebSocket streaming order books — push updates instead of REST polling, so
     data is sub-second fresh and you avoid per-market rate limits. Polymarket's
@@ -219,6 +234,7 @@ class Settings(BaseSettings):
     risk: RiskLimits = Field(default_factory=RiskLimits)
     exits: ExitSettings = Field(default_factory=ExitSettings)
     market_maker: MarketMakerSettings = Field(default_factory=MarketMakerSettings)
+    signal: SignalSettings = Field(default_factory=SignalSettings)
     kalshi: KalshiCreds = Field(default_factory=KalshiCreds)
     polymarket: PolymarketCreds = Field(default_factory=PolymarketCreds)
     anthropic: AnthropicCreds = Field(default_factory=AnthropicCreds)

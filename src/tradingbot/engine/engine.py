@@ -25,6 +25,7 @@ from tradingbot.engine.portfolio import Portfolio
 from tradingbot.engine.risk import RiskManager
 from tradingbot.engine.router import ExchangeRouter
 from tradingbot.engine.linker import EventLinker
+from tradingbot.engine.signals import SignalStore
 from tradingbot.engine.universe import UniverseSelector
 from tradingbot.exchanges.base import Exchange
 from tradingbot.exchanges.paper import PaperExchange
@@ -52,6 +53,12 @@ class Engine:
         self.exits = ExitManager(settings.exits)
         self.universe = UniverseSelector(settings.universe)
         self.linker = EventLinker(settings.links)
+        self.signals = SignalStore()
+        # Hand the shared signal store to any signal strategy (decouples the
+        # signal source — agent/model — from the executing strategy).
+        for strat in self.strategies:
+            if hasattr(strat, "set_store"):
+                strat.set_store(self.signals)
         self._locked_day = ""        # day on which lock-gains already fired
         self._paused_by_goals = False
 

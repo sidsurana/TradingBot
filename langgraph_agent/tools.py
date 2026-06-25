@@ -85,6 +85,22 @@ def run_quant_analysis(skill_name: str) -> str:
 
 
 @tool
+def set_market_signal(venue: str, market_id: str, fair_value: float, confidence: float) -> dict:
+    """Push a directional fair-value view for the signal strategy to act on (when
+    'signal' is enabled). venue is 'kalshi'/'polymarket'; fair_value and confidence
+    are probabilities in 0-1. Use after analysis when you have a genuine edge view;
+    the strategy sizes the position by fractional Kelly within the risk caps."""
+    return _post("/signals", {"venue": venue, "market_id": market_id,
+                              "fair_value": fair_value, "confidence": confidence})
+
+
+@tool
+def list_signals() -> list:
+    """Current directional fair-value signals the signal strategy is acting on."""
+    return _get("/signals")
+
+
+@tool
 def pause_trading() -> dict:
     """Halt new order placement (market data and stop-loss exits keep running)."""
     return _post("/pause")
