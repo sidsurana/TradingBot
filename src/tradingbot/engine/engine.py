@@ -70,9 +70,28 @@ class Engine:
             self._paper.set_book_source(lambda m: self.stream.book(m.key))
 
         self.markets: list[Market] = []
+        # Every market we've ever tracked or traded, so a fill still resolves even
+        # after its market leaves the curated universe (e.g. an exit closing it).
+        self._market_registry: dict[str, Market] = {}
         self._fill_cursor = 0
         self._stop = asyncio.Event()
         self._trade_lock = asyncio.Lock()  # serializes the periodic loop vs the reactor
+
+        # Durable state: replay persisted fills to rebuild the portfolio exactly.
+        self.store = None
+        if settings.persistence.enabled:
+            from tradingbot.engine.store import Store
+
+            self.store = Store(settings.persistence.path)
+            restored = self.store.load_fills()
+            for market, fill in restored:
+                self._market_registry[market.key] = market
+                self.portfolio.record_fill(market, fill, log_fill=False)
+            open_positions = [p for p in self.portfolio.positions.values() if p.size != 0]
+            if restored:
+                log.info("persistence.restored", fills=len(restored),
+                         open_positions=len(open_positions),
+                         cash=str(round(self.portfolio.cash, 2)))
         self.paused = False          # agent/operator can halt order placement live
         self.last_books: dict[str, OrderBook] = {}  # latest snapshot, for introspection
         self.manual_orders: list = []  # discretionary orders queued by the agent/operator
@@ -84,6 +103,7 @@ class Engine:
         if limit is not None:
             selected = selected[:limit]
         self.markets = selected
+        self._market_registry.update({m.key: m for m in selected})
         log.info("engine.universe", discovered=len(raw), tracked=len(self.markets))
 
     def stop(self) -> None:
@@ -125,6 +145,8 @@ class Engine:
                         pass
             if self.stream is not None:
                 await self.stream.stop()
+            if self.store is not None:
+                self.store.close()
             log.info("engine.stopped",
                      session_pnl=str(round(self.portfolio.session_pnl({}), 4)))
 
@@ -319,6 +341,7 @@ class Engine:
 
     async def _place_orders(self, orders: list, books: dict[str, OrderBook]) -> None:
         for order in orders:
+            self._market_registry.setdefault(order.market.key, order.market)
             if not self.risk.approve(order, books):
                 continue
             try:
@@ -359,13 +382,18 @@ class Engine:
         return books
 
     def _drain_fills(self) -> None:
-        """Move new simulated fills into the portfolio (paper mode)."""
+        """Move new simulated fills into the portfolio (paper mode) and persist
+        them. Resolves markets via the registry so a fill for a market that left
+        the curated universe (e.g. an exit closing it) is never dropped."""
         if self._paper is None:
             return  # live fill reconciliation is a separate concern (venue polling)
         new = self._paper.fills[self._fill_cursor :]
         self._fill_cursor = len(self._paper.fills)
-        market_by_key = {m.key: m for m in self.markets}
         for fill in new:
-            market = market_by_key.get(fill.market_key)
-            if market is not None:
-                self.portfolio.record_fill(market, fill)
+            market = self._market_registry.get(fill.market_key)
+            if market is None:
+                log.warning("fill.unresolved_market", market=fill.market_key)
+                continue
+            self.portfolio.record_fill(market, fill)
+            if self.store is not None:
+                self.store.record_fill(market, fill)

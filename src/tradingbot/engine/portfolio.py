@@ -25,7 +25,7 @@ class Portfolio:
     def position(self, market: Market) -> Position:
         return self.positions.setdefault(market.key, Position(market=market))
 
-    def record_fill(self, market: Market, fill: Fill) -> None:
+    def record_fill(self, market: Market, fill: Fill, log_fill: bool = True) -> None:
         pos = self.position(market)
         pos.apply(fill)
         # Cash out/in for the traded notional + fees.
@@ -35,8 +35,9 @@ class Portfolio:
         else:
             self.cash += notional
         self.cash -= fill.fee
-        log.info("portfolio.fill", market=market.key, side=fill.side.value,
-                 size=str(fill.size), price=fill.price, cash=str(round(self.cash, 4)))
+        if log_fill:  # quiet during startup replay of persisted fills
+            log.info("portfolio.fill", market=market.key, side=fill.side.value,
+                     size=str(fill.size), price=fill.price, cash=str(round(self.cash, 4)))
 
     def gross_notional(self, marks: dict[str, OrderBook]) -> Decimal:
         total = Decimal(0)

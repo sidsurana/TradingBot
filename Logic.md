@@ -47,6 +47,17 @@ strategies pick within the universe by edge (arb: `min_edge`; MM: widest spreads
 and risk bounds exposure. See `Roadmap.md` → "How market selection works" for the
 full description. Knobs: `TB_UNIVERSE_*`.
 
+## 1b. Persistence **[implemented]**
+
+State is **event-sourced**: every fill is appended to SQLite (`engine/store.py`),
+and on startup the engine replays all fills in order to rebuild the portfolio —
+positions, average prices, realized PnL, and cash — exactly as it was. So a crash
+or restart doesn't lose positions or reset the daily goal baseline (equity is
+restored, so the goal math stays correct). The fills table is also a durable
+audit/analysis log. A market registry ensures a fill still resolves even after
+its market leaves the curated universe (e.g. an exit closing a position).
+Default off; enable with `TB_PERSIST_ENABLED=true` before any unattended run.
+
 ## 2. The engine tick **[implemented]**
 
 Every `TB_LOOP_INTERVAL_S` seconds:

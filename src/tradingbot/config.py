@@ -164,6 +164,17 @@ class StreamingSettings(BaseSettings):
     react_debounce_s: float = 0.01
 
 
+class PersistenceSettings(BaseSettings):
+    """Durable state so a restart doesn't lose positions or re-baseline goals.
+    Event-sourced: every fill is persisted, then replayed on startup to rebuild
+    the portfolio exactly. Needed before any unattended real-money run."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_PERSIST_")
+
+    enabled: bool = False
+    path: str = ".tradingbot/state.db"
+
+
 class ApiSettings(BaseSettings):
     """HTTP control API — the surface an external (LangGraph) agent drives. The
     bot itself makes no LLM calls; this exposes reads, gated actions, and
@@ -197,6 +208,7 @@ class Settings(BaseSettings):
     telegram: TelegramCreds = Field(default_factory=TelegramCreds)
     goals: GoalSettings = Field(default_factory=GoalSettings)
     autopilot: AutopilotSettings = Field(default_factory=AutopilotSettings)
+    persistence: PersistenceSettings = Field(default_factory=PersistenceSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
     streaming: StreamingSettings = Field(default_factory=StreamingSettings)
 

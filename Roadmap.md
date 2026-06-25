@@ -27,6 +27,7 @@ See `Logic.md` for how each shipped piece works, `SETUP.md` to run it.
 | 13 | Event-driven acting | **live-validated, ~11 ms react; edge→fill ~100–200 ms** |
 | 14 | Kalshi live order signing (RSA) | signing tested |
 | 15 | Universe curation (tradeable filter + volume rank + periodic refresh) | **live-validated**; Polymarket via Gamma API, Kalshi by volume |
+| 16 | Persistence — event-sourced fills in SQLite | positions/cash/goals survive restart via replay; market registry so exits always resolve |
 
 ---
 
@@ -48,10 +49,9 @@ can't be confirmed without a live account.
 
 | # | Item | Why | Effort |
 |---|---|---|---|
-| 15 | **Persistence** (positions / fills / audit / goals) to SQLite | So a restart doesn't lose positions or re-baseline goals mid-day; needed before unattended real-money runs | M |
-| 16 | **Signal / model strategy** | Turn the agent's `regime`/`alpha` Quant skills into live directional positions (sized fractional-Kelly, protected by stop-loss) — the third strategy | M–L |
-| 17 | **Cross-venue event-mapping table** | Today cross-venue arb relies on a shared `event_id`; a real mapping (the same World Cup match on Kalshi *and* Polymarket) unlocks far more arb | M |
-| 18 | **Per-fill venue reconciliation (live)** | In live mode, reconcile our portfolio against venue-reported positions/fills each tick (paper drains locally today) | M |
+| 17 | **Cross-venue event-mapping table** | Today cross-venue arb relies on a shared `event_id`, which never matches across venues — so cross-venue arb effectively can't fire. A real mapping (the same World Cup match on Kalshi *and* Polymarket) makes it work and unlocks far more arb | M |
+| 18 | **Signal / model strategy** | Turn the agent's `regime`/`alpha` Quant skills into live directional positions (sized fractional-Kelly, protected by stop-loss) — the third strategy | M–L |
+| 19 | **Per-fill venue reconciliation (live)** | In live mode, reconcile our portfolio against venue-reported positions/fills each tick (paper drains locally today) | M |
 
 ---
 
