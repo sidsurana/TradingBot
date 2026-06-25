@@ -111,6 +111,18 @@ class Engine:
         selected = self.universe.select(raw)
         if limit is not None:
             selected = selected[:limit]
+        # Always keep markets we hold a position in, even if they fell out of the
+        # volume-ranked universe. Otherwise they get no fresh book and the exit
+        # manager silently skips them (no stop-loss/take-profit) — a position could
+        # then run past its stop unprotected, which is exactly what must never happen.
+        have = {m.key for m in selected}
+        raw_by_key = {m.key: m for m in raw}
+        for key, pos in self.portfolio.positions.items():
+            if key not in have and abs(pos.size) > 0:
+                mkt = raw_by_key.get(key) or self._market_registry.get(key)
+                if mkt is not None:
+                    selected.append(mkt)
+                    have.add(key)
         self.linker.annotate(selected)   # stamp cross-venue link_ids for arbitrage
         self.markets = selected
         self._market_registry.update({m.key: m for m in selected})
@@ -313,12 +325,18 @@ class Engine:
             except Exception as exc:  # noqa: BLE001
                 log.error("strategy.error", strategy=strat.name, error=str(exc))
 
-        # Cancel quotes that filled, vanished from the target set, or moved price.
+        # Cancel quotes that filled, vanished from the target set, or moved price by
+        # more than the requote tolerance. The tolerance is what stops churn: the MM
+        # recomputes target prices from the live book every tick and they jitter by
+        # sub-tick amounts, which would otherwise trigger a cancel/replace every tick
+        # and blow through the order rate limit.
+        tol = self.settings.market_maker.requote_tolerance
         for key, order in list(self._quotes.items()):
             if only_keys is not None and key[0] not in only_keys:
                 continue
             want = desired.get(key)
-            if order.is_terminal or want is None or want.price != order.price:
+            moved = want is not None and abs(float(want.price) - float(order.price)) > tol
+            if order.is_terminal or want is None or moved:
                 if not order.is_terminal:
                     try:
                         await self.exec.cancel_order(order)

@@ -57,7 +57,9 @@ def _build_strategy(name: str, settings: Settings):
     if name == "market_maker":
         mm = settings.market_maker
         return build(name, min_spread=mm.min_spread, quote_size=mm.quote_size,
-                     max_inventory=mm.max_inventory, max_markets=mm.max_markets)
+                     max_inventory=mm.max_inventory, max_markets=mm.max_markets,
+                     exclude_sports=mm.exclude_sports,
+                     min_hours_to_resolution=mm.min_hours_to_resolution)
     if name == "signal":
         sg = settings.signal
         return build(name, kelly_fraction=sg.kelly_fraction, bankroll=sg.bankroll,

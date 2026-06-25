@@ -265,8 +265,10 @@ class PolymarketStream(StreamClient):
         while True:
             try:
                 # Manual PING/PONG keep-alive (the server drops idle conns; its
-                # built-in ping is disabled so we control it).
-                async with websockets.connect(self.URL, ping_interval=None) as ws:
+                # built-in ping is disabled so we control it). max_size=None: a
+                # large universe's initial book snapshot exceeds the default 1 MB
+                # frame limit (server sends it as one frame), which would 1009-drop.
+                async with websockets.connect(self.URL, ping_interval=None, max_size=None) as ws:
                     await ws.send(json.dumps({"assets_ids": list(key_by_token),
                                               "type": "market"}))
                     log.info("polymarket_stream.subscribed", markets=len(key_by_token))

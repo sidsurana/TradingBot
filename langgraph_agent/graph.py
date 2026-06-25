@@ -38,7 +38,8 @@ execution to act). Sensitive actions (limit changes, capital, go-live,
 kill-switch) come back from a specialist with a confirmation summary — relay it
 to the operator, get an explicit "yes", then tell the specialist to confirm.
 Never confirm on the operator's behalf. Be concise; these are phone messages —
-lead with the answer."""
+lead with the answer. Write plain text only: no Markdown, asterisks, bold,
+headings, or backticks (they render as literal characters in the chat)."""
 
 
 def build_supervisor(checkpointer=None):

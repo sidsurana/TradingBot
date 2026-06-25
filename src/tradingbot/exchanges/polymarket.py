@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from decimal import Decimal
 
 import httpx
@@ -60,12 +61,23 @@ def parse_gamma_markets(data: list, venue: Venue, event_filter: str | None = Non
         volume = float(m.get("volume24hr") or m.get("volume") or 0)
         category = (m.get("category") or "").lower()
         tick = float(m.get("orderPriceMinTickSize") or m.get("minimum_tick_size") or 0.01)
+        # Sports / resolution flags so strategies can avoid event-driven, in-play, or
+        # about-to-resolve markets (adverse-selection traps for a market maker).
+        is_sports = bool(m.get("sportsMarketType") or m.get("gameStartTime"))
+        end_iso = m.get("endDateIso") or m.get("endDate") or ""
+        end_ts = 0.0
+        if end_iso:
+            try:
+                end_ts = datetime.fromisoformat(str(end_iso).replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                end_ts = 0.0
         for i, token_id in enumerate(ids):
             outcome = outcomes[i] if i < len(outcomes) else "YES"
             out.append(Market(
                 venue=venue, market_id=str(token_id), event_id=condition or str(token_id),
                 title=question or condition, outcome=str(outcome), tick_size=tick,
-                metadata={"volume": volume, "category": category},
+                metadata={"volume": volume, "category": category,
+                          "is_sports": is_sports, "end_ts": end_ts},
             ))
     return out
 
@@ -111,12 +123,24 @@ class PolymarketExchange(Exchange):
     async def list_markets(self, *, event_filter: str | None = None) -> list[Market]:
         assert self._client is not None, "connect() first"
         # Gamma, server-side filtered to tradeable markets, sorted by 24h volume.
-        resp = await self._client.get(GAMMA_URL, params={
-            "active": "true", "closed": "false", "archived": "false",
-            "order": "volume24hr", "ascending": "false", "limit": 300,
-        })
-        resp.raise_for_status()
-        return parse_gamma_markets(resp.json(), self.venue, event_filter)
+        # Gamma caps a page at 100; paginate by offset up to discovery_max so broad
+        # coverage is possible. The universe selector then keeps the most liquid N.
+        target = self._creds.discovery_max
+        out: list[Market] = []
+        offset = 0
+        while len(out) < target:
+            resp = await self._client.get(GAMMA_URL, params={
+                "active": "true", "closed": "false", "archived": "false",
+                "order": "volume24hr", "ascending": "false",
+                "limit": 100, "offset": offset,
+            })
+            resp.raise_for_status()
+            raw = resp.json()
+            if not raw:
+                break  # ran out of markets
+            out += parse_gamma_markets(raw, self.venue, event_filter)
+            offset += len(raw)  # advance by the raw page size Gamma returned
+        return out
 
     async def fetch_order_book(self, market: Market, depth: int = 10) -> OrderBook:
         assert self._client is not None, "connect() first"
