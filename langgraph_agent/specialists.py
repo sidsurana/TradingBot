@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover
 
 # One model, shared by all agents. claude-opus-4-8 by default; set
 # LANGGRAPH_MODEL=claude-haiku-4-5 for cheap, frequent runs.
-MODEL = os.getenv("LANGGRAPH_MODEL", "claude-opus-4-8")
+MODEL = os.getenv("LANGGRAPH_MODEL", "claude-haiku-4-5")
 
 
 def _model() -> ChatAnthropic:

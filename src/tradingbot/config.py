@@ -77,7 +77,7 @@ class AnthropicCreds(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TB_ANTHROPIC_", env_file=".env", extra="ignore")
 
     api_key: str = ""                # falls back to ANTHROPIC_API_KEY if empty
-    model: str = "claude-opus-4-8"   # latest Opus; adaptive thinking
+    model: str = "claude-haiku-4-5-20251001"  # Haiku only — Opus costs too much for this use
     effort: str = "high"             # low | medium | high | xhigh | max
     max_tokens: int = 8000
 
