@@ -29,7 +29,7 @@ from tradingbot.engine.signals import SignalStore
 from tradingbot.engine.universe import UniverseSelector
 from tradingbot.exchanges.base import Exchange
 from tradingbot.exchanges.paper import PaperExchange
-from tradingbot.models import Fill, Market, OrderBook, OrderStatus
+from tradingbot.models import Fill, Market, OrderBook, OrderStatus, Venue
 from tradingbot.strategies.base import Context, Strategy
 
 log = structlog.get_logger(__name__)
@@ -96,6 +96,12 @@ class Engine:
             for market, fill in restored:
                 self._market_registry[market.key] = market
                 self.portfolio.record_fill(market, fill, log_fill=False)
+                # Rehydrate the paper layer's own book so held positions can
+                # still settle after a restart. restore_fill mirrors the fill
+                # into paper._positions WITHOUT touching paper.fills, so the
+                # fill cursor stays put and _drain_fills never double-counts.
+                if self._paper is not None:
+                    self._paper.restore_fill(market, fill)
             open_positions = [p for p in self.portfolio.positions.values() if p.size != 0]
             if restored:
                 # Replay restored LIFETIME PnL; re-baseline so max_daily_loss
@@ -152,6 +158,9 @@ class Engine:
         curator_task = None
         if self.settings.universe.refresh_interval_min > 0:
             curator_task = asyncio.create_task(self._curator())
+        settlement_task = None
+        if self.settings.settlement.enabled:
+            settlement_task = asyncio.create_task(self._settlement())
         try:
             while not self._stop.is_set():
                 await self._tick()
@@ -167,7 +176,7 @@ class Engine:
                 except asyncio.TimeoutError:
                     pass
         finally:
-            for task in (reactor_task, curator_task):
+            for task in (reactor_task, curator_task, settlement_task):
                 if task is not None:
                     task.cancel()
                     try:
@@ -298,6 +307,64 @@ class Engine:
                              added=len(new - old), removed=len(old - new), tracked=len(new))
             except Exception as exc:  # noqa: BLE001
                 log.error("curator.error", error=str(exc))
+
+    async def _settlement(self) -> None:
+        """Periodically redeem resolved Polymarket positions. Resolved markets
+        leave the active universe, so a held token would otherwise strand at its
+        last mark forever; this polls Gamma for resolution and books a synthetic
+        redemption fill at $1 (winner) or $0 (loser). Paper mode only — same
+        start/cancel lifecycle as the curator."""
+        interval = self.settings.settlement.poll_min * 60
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                return  # stop requested
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._settle_once()
+            except Exception as exc:  # noqa: BLE001
+                log.error("settlement.error", error=str(exc))
+
+    async def _settle_once(self) -> None:
+        """One settlement poll cycle: find held Polymarket positions, ask the
+        Polymarket adapter which have resolved, and redeem those in the paper
+        book. No-op in live mode or when no Polymarket venue is wired."""
+        if self._paper is None:
+            return  # live venues redeem on-chain; nothing to simulate
+        held: list[Market] = []
+        for key, pos in self.portfolio.positions.items():
+            if pos.size == 0:
+                continue
+            market = self._market_registry.get(key)
+            if market is None or market.venue is not Venue.POLYMARKET:
+                continue
+            held.append(market)
+        if not held:
+            return
+        # Reach the Polymarket adapter through the router, the same routing
+        # discover() uses. Absent venue -> no-op.
+        try:
+            poly = self.router._for(held[0])
+        except KeyError:
+            return
+        fetch = getattr(poly, "fetch_resolutions", None)
+        if fetch is None:
+            return
+        resolutions = await fetch(held)
+        if not resolutions:
+            return
+        for market in held:
+            price = resolutions.get(market.key)
+            if price is None:
+                continue
+            before = self.portfolio.position(market).realized_pnl
+            if not self._paper.settle(market, price):
+                continue  # nothing to redeem — don't log a false success
+            self._drain_fills()
+            realized = self.portfolio.position(market).realized_pnl - before
+            log.info("settlement.redeemed", market=market.key, price=price,
+                     realized=str(round(realized, 4)))
 
     async def _reactor(self) -> None:
         """Waits on stream updates and fires the fast path, debounced to coalesce

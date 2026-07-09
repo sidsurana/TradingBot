@@ -269,6 +269,57 @@ class SizingSettings(BaseSettings):
     max_notional_per_trade: Decimal = Decimal(500)
 
 
+class CertaintyCarrySettings(BaseSettings):
+    """Certainty Carry — the Polymarket near-certain carry harvest.
+
+    Buy outcome tokens priced in a narrow high band (structurally underpriced
+    vs their true resolution probability, due to favorite-longshot bias and the
+    zero-yield-collateral discount), hold to on-chain resolution for the $1
+    redemption. Downside is managed by (a) entry filters that avoid gap-prone
+    and informed-flow markets, (b) a complement-set exit (buy the OTHER outcome
+    to lock a guaranteed $1 set when a position deteriorates — never a naive
+    price stop, which whipsaws and can't fill through a resolution gap), and
+    (c) position sizing that survives a full -100% loss.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="TB_CARRY_", env_file=".env", extra="ignore")
+
+    price_min: float = 0.94          # only acquire tokens whose best ask is in
+    price_max: float = 0.96          # [price_min, price_max]
+    max_spread: float = 0.015        # skip wide books (spread eats the edge + adverse selection)
+    min_volume_24h: float = 5000.0   # require real liquidity ($ 24h)
+    min_hours_to_resolution: float = 48.0   # NEVER buy closer than this — near-resolution
+    max_days_to_resolution: float = 14.0    # tokens are disproportionately informed flow
+    min_annualized_carry: float = 1.0       # require >=100%/yr annualized carry to bother
+    max_positions: int = 8                  # concurrent position cap
+    max_per_group: int = 2                  # cap per correlation group (category + subject)
+    sleeve_fraction: float = 0.40           # <= this fraction of equity deployed at once
+    max_notional_per_position: Decimal = Decimal(50)  # $ per market
+    # Exit: if a held token's mid falls below this, take the better of
+    # (sell at bid) vs (buy complement to lock a $1 set) — reduce-only.
+    complement_exit_below: float = 0.85
+    require_uma_ok: bool = True       # only enter markets whose uma_status is clean (not disputed)
+    # Skip markets whose resolution is subjective / gaps on a single headline.
+    veto_keywords: list[str] = Field(default_factory=lambda: [
+        "announce", "confirm", "tweet", "say", "said", "claim"])
+    # Only trade continuously-observable-underlying categories in v1 (crypto/index
+    # thresholds, poll-tracked politics). Empty => allow all non-vetoed markets.
+    allowed_categories: list[str] = Field(default_factory=list)
+
+
+class SettlementSettings(BaseSettings):
+    """Paper redemption of resolved prediction-market positions. Resolved
+    markets leave the active universe, so held tokens would otherwise strand at
+    their last mark forever. This polls for resolution and books a synthetic
+    redemption fill at $1 (winning token) or $0 (loser). Also fixes the same
+    latent gap in the existing dutch-book arbitrage strategy."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_SETTLE_", env_file=".env", extra="ignore")
+
+    enabled: bool = False
+    poll_min: float = 5.0            # how often to poll Gamma for held-market resolution
+
+
 class StreamingSettings(BaseSettings):
     """WebSocket streaming order books — push updates instead of REST polling, so
     data is sub-second fresh and you avoid per-market rate limits. Polymarket's
@@ -332,6 +383,8 @@ class Settings(BaseSettings):
     breakout: BreakoutSettings = Field(default_factory=BreakoutSettings)
     trend: TrendSettings = Field(default_factory=TrendSettings)
     sizing: SizingSettings = Field(default_factory=SizingSettings)
+    carry: CertaintyCarrySettings = Field(default_factory=CertaintyCarrySettings)
+    settlement: SettlementSettings = Field(default_factory=SettlementSettings)
     links: LinkSettings = Field(default_factory=LinkSettings)
     risk: RiskLimits = Field(default_factory=RiskLimits)
     exits: ExitSettings = Field(default_factory=ExitSettings)

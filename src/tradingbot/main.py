@@ -52,7 +52,11 @@ def build_engine(settings: Settings) -> Engine:
         data_feed = MarketDataExchange(settings.datafeed)
         venues[Venue.DATA] = data_feed
     if not (settings.datafeed.enabled and settings.datafeed.only):
-        venues[Venue.KALSHI] = KalshiExchange(settings.kalshi)
+        # Only wire Kalshi when it's actually configured — otherwise the engine
+        # would pointlessly hit Kalshi's public API each discovery cycle. The
+        # Polymarket-only certainty-carry profile leaves this off.
+        if settings.kalshi.configured:
+            venues[Venue.KALSHI] = KalshiExchange(settings.kalshi)
         venues[Venue.POLYMARKET] = PolymarketExchange(settings.polymarket)
     router = ExchangeRouter(venues)
     strategies = [_build_strategy(name, settings) for name in settings.enabled_strategies]
@@ -84,6 +88,8 @@ def _build_strategy(name: str, settings: Settings):
         return build(name, cfg=settings.breakout, sizing=settings.sizing)
     if name == "trend":
         return build(name, cfg=settings.trend, sizing=settings.sizing)
+    if name == "certainty_carry":
+        return build(name, cfg=settings.carry)
     return build(name)
 
 

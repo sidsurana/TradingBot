@@ -64,6 +64,7 @@ def parse_gamma_markets(data: list, venue: Venue, event_filter: str | None = Non
         # Sports / resolution flags so strategies can avoid event-driven, in-play, or
         # about-to-resolve markets (adverse-selection traps for a market maker).
         is_sports = bool(m.get("sportsMarketType") or m.get("gameStartTime"))
+        uma_status = str(m.get("umaResolutionStatus") or "").lower()
         end_iso = m.get("endDateIso") or m.get("endDate") or ""
         end_ts = 0.0
         if end_iso:
@@ -77,8 +78,43 @@ def parse_gamma_markets(data: list, venue: Venue, event_filter: str | None = Non
                 venue=venue, market_id=str(token_id), event_id=condition or str(token_id),
                 title=question or condition, outcome=str(outcome), tick_size=tick,
                 metadata={"volume": volume, "category": category,
-                          "is_sports": is_sports, "end_ts": end_ts},
+                          "is_sports": is_sports, "end_ts": end_ts,
+                          "uma_status": uma_status},
             ))
+    return out
+
+
+def parse_gamma_resolutions(data: list, held_keys: set[str]) -> dict[str, float]:
+    """Map held Polymarket token keys to their redemption value (1.0 winner,
+    0.0 loser) for markets that have FINALLY resolved. Pure (no network).
+
+    A market counts as resolved only when umaResolutionStatus == "resolved"
+    (empty / "proposed" / "disputed" are non-final and OMITTED) and its
+    outcomePrices array — aligned to outcomes/clobTokenIds — is present. The
+    winning outcome carries a price of ~1.0, the loser ~0.0."""
+    out: dict[str, float] = {}
+    for m in data:
+        uma = str(m.get("umaResolutionStatus") or "").lower()
+        if uma != "resolved":
+            continue  # non-final (proposed / disputed / open) -> not redeemable yet
+        ids = m.get("clobTokenIds")
+        prices = m.get("outcomePrices")
+        try:
+            ids = json.loads(ids) if isinstance(ids, str) else (ids or [])
+            prices = json.loads(prices) if isinstance(prices, str) else (prices or [])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not ids or not prices or len(prices) < len(ids):
+            continue  # missing outcome prices -> can't determine the winner
+        for i, token_id in enumerate(ids):
+            key = f"{Venue.POLYMARKET.value}:{token_id}"
+            if key not in held_keys:
+                continue
+            try:
+                p = float(prices[i])
+            except (ValueError, TypeError):
+                continue
+            out[key] = 1.0 if p >= 0.5 else 0.0
     return out
 
 
@@ -195,6 +231,36 @@ class PolymarketExchange(Exchange):
         if not order.is_terminal:
             order.status = OrderStatus.CANCELED
         return order
+
+    async def fetch_resolutions(self, markets: list[Market]) -> dict[str, float]:
+        """For the given held tokens, return {market.key: 1.0|0.0} ONLY for
+        markets that have finally resolved on-chain. Resolved markets leave the
+        active (closed=false) universe, so we must query Gamma by their
+        conditionIds INCLUDING closed markets. Never raises: network / parse
+        failures are logged and yield a partial (or empty) result so the
+        settlement poller keeps running."""
+        if self._client is None or not markets:
+            return {}
+        held_keys = {m.key for m in markets}
+        condition_ids = sorted({m.event_id for m in markets if m.event_id})
+        out: dict[str, float] = {}
+        # Gamma caps query params; chunk the conditionIds defensively.
+        for i in range(0, len(condition_ids), 20):
+            chunk = condition_ids[i : i + 20]
+            params: list[tuple[str, object]] = [("condition_ids", c) for c in chunk]
+            params += [("closed", "true"), ("limit", 100)]
+            try:
+                resp = await self._client.get(GAMMA_URL, params=params)
+                resp.raise_for_status()
+                raw = resp.json()
+            except Exception as exc:  # noqa: BLE001 — never break the poll loop
+                log.warning("polymarket.resolutions_error", error=str(exc))
+                continue
+            try:
+                out.update(parse_gamma_resolutions(raw, held_keys))
+            except Exception as exc:  # noqa: BLE001 — defensive against odd payloads
+                log.warning("polymarket.resolutions_parse_error", error=str(exc))
+        return out
 
     async def fetch_positions(self) -> list[Position]:
         # Polymarket positions are derived from on-chain ERC-1155 balances; the

@@ -100,6 +100,43 @@ class PaperExchange(Exchange):
     async def fetch_positions(self) -> list[Position]:
         return [p for p in self._positions.values() if p.size != 0]
 
+    def restore_fill(self, market: Market, fill: Fill) -> None:
+        """Mirror a replayed persisted fill into local position state on startup
+        WITHOUT appending to self.fills. The engine already books restored fills
+        straight into the Portfolio; this rehydrates the paper layer's own
+        _positions so a held position can still settle/redeem after a restart.
+        Appending to self.fills here would make _drain_fills double-count, so we
+        deliberately don't — restore is a mirror, not a new trade."""
+        self._positions.setdefault(market.key, Position(market=market)).apply(fill)
+
+    def settle(self, market: Market, redemption_price: float) -> bool:
+        """Redeem the current net position in `market` at `redemption_price`
+        (1.0 winning token, 0.0 loser). Appends a zero-fee Fill that flattens
+        the position — SELL when long, BUY when short — and drives the local
+        position to zero. The engine's _drain_fills then books it into the
+        Portfolio, realizing PnL (e.g. a token bought at 0.95 redeeming at 1.0
+        yields +0.05/share cash). Returns True when a redemption fill was
+        emitted, False when there's nothing to settle (no/flat position) — in
+        which case it emits no fill and logs no false success."""
+        pos = self._positions.get(market.key)
+        if pos is None or pos.size == 0:
+            return False
+        size = abs(pos.size)
+        side = Side.SELL if pos.size > 0 else Side.BUY
+        fill = Fill(
+            market_key=market.key,
+            side=side,
+            size=size,
+            price=float(redemption_price),
+            fee=Decimal(0),
+            order_client_id=f"settle-{uuid.uuid4().hex[:8]}",
+        )
+        self.fills.append(fill)
+        pos.apply(fill)
+        log.info("paper.settle", market=market.key, side=side.value,
+                 size=str(size), price=redemption_price)
+        return True
+
     def match_resting(self, books: dict[str, OrderBook]) -> None:
         """Fill any resting orders the given books have traded through. The engine
         calls this each tick so market-maker quotes can fill on live data."""

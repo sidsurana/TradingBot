@@ -11,3 +11,10 @@ build/
 *.egg-info/
 .tradingbot/
 *.log
+
+# LangGraph bridge runtime state
+langgraph_agent/agent_threads.db*
+langgraph_agent/pnl_history.csv
+langgraph_agent/.pnl_last_report
+langgraph_agent/.morning_last_brief
+langgraph_agent/.evening_last_report
