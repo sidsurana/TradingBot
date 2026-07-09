@@ -182,79 +182,59 @@ YAHOO_ALL = {"SPY": UP, "QQQ": DOWN, "GC=F": UP, "CL=F": DOWN}
 
 
 def test_morning_brief_happy_path():
+    # A near-term and a far-term carry position; brief ranks soonest-first.
+    now = datetime.now(tb._report_tz()).timestamp()
+    pf = {"equity": 999.77, "cash": 900.11, "session_pnl": -0.23,
+          "open_position_count": 2}
+    pos = [
+        {"title": "Will Norway win the 2026 World Cup?", "outcome": "No",
+         "size": 53, "avg_price": 0.941, "mark": 0.9405, "unrealized_pnl": -0.03,
+         "close_time": now + 32 * 86400},
+        {"title": "Israel closes its airspace by July 15?", "outcome": "No",
+         "size": 52, "avg_price": 0.96, "mark": 0.9595, "unrealized_pnl": -0.03,
+         "close_time": now + 6 * 3600},
+    ]
+
     async def go():
-        async with _mock_client(YAHOO_ALL, UP) as client:
+        async with _api_client(pf, pos) as client:
             return await tb.build_morning_brief(client)
 
     msg = asyncio.run(go())
     lines = msg.splitlines()
     assert "Morning brief" in lines[0]
-    # header carries today's date
     assert datetime.now(tb._report_tz()).strftime("%d %b %Y") in lines[0]
-    assert "SPY: 102.00 (+2.00% 1d, above 20d avg)" in lines
-    assert "QQQ: 48.00 (-4.00% 1d, below 20d avg)" in lines
-    assert "GC=F: 102.00 (+2.00% 1d, above 20d avg)" in lines
-    assert "CL=F: 48.00 (-4.00% 1d, below 20d avg)" in lines
-    assert "BTC-USD: 102.00 (+2.00% 1d, above 20d avg)" in lines
-    assert "data unavailable" not in msg
+    assert "Certainty Carry book" in lines
+    assert "Equity $999.77 | cash $900.11 | deployed $99.66 (2 positions)" in lines
+    # soonest-to-resolve first: the 6h airspace market ranks above the 32d one
+    airspace_i = next(i for i, l in enumerate(lines) if "airspace" in l)
+    norway_i = next(i for i, l in enumerate(lines) if "Norway" in l)
+    assert airspace_i < norway_i
+    assert "~6h to resolve" in lines[airspace_i]
+    assert "~32d to resolve" in lines[norway_i]
     assert "*" not in msg and "`" not in msg  # plain text for Telegram
 
 
-def test_morning_brief_sends_browser_user_agent_to_yahoo():
-    captured: list[httpx.Request] = []
-
+def test_morning_brief_engine_offline_still_sends():
     async def go():
-        async with _mock_client(YAHOO_ALL, UP, captured=captured) as client:
-            return await tb.build_morning_brief(client)
-
-    asyncio.run(go())
-    yahoo_reqs = [r for r in captured if r.url.host == "query1.finance.yahoo.com"]
-    assert len(yahoo_reqs) == 4
-    for r in yahoo_reqs:
-        assert "Mozilla" in r.headers.get("User-Agent", "")
-        assert r.url.params["range"] == "1mo"
-        assert r.url.params["interval"] == "1d"
-    cb_reqs = [r for r in captured if r.url.host == "api.exchange.coinbase.com"]
-    assert len(cb_reqs) == 1
-    assert cb_reqs[0].url.params["granularity"] == "86400"
-
-
-def test_morning_brief_degrades_per_symbol():
-    async def go():
-        async with _mock_client(YAHOO_ALL, UP, fail_symbols={"QQQ", "CL=F"}) as client:
+        async with _api_client(down=True) as client:
             return await tb.build_morning_brief(client)
 
     msg = asyncio.run(go())
-    lines = msg.splitlines()
-    assert "QQQ: data unavailable" in lines
-    assert "CL=F: data unavailable" in lines
-    # the healthy symbols still render fully
-    assert "SPY: 102.00 (+2.00% 1d, above 20d avg)" in lines
-    assert "BTC-USD: 102.00 (+2.00% 1d, above 20d avg)" in lines
+    assert "Morning brief" in msg
+    assert "Engine offline" in msg
 
 
-def test_morning_brief_all_sources_down_still_sends():
+def test_morning_brief_no_positions():
+    pf = {"equity": 1000.0, "cash": 1000.0, "session_pnl": 0.0,
+          "open_position_count": 0}
+
     async def go():
-        async with _mock_client({}, None) as client:  # 404s + coinbase 500
+        async with _api_client(pf, []) as client:
             return await tb.build_morning_brief(client)
 
     msg = asyncio.run(go())
-    lines = msg.splitlines()
-    assert len(lines) == 6  # header + 5 instruments, message always builds
-    for sym in ("SPY", "QQQ", "GC=F", "CL=F", "BTC-USD"):
-        assert f"{sym}: data unavailable" in lines
-
-
-def test_morning_brief_skips_null_yahoo_closes():
-    """Yahoo pads live bars with nulls; they must not poison the math."""
-    closes = [100.0, None, 100.0, 102.0]
-
-    async def go():
-        async with _mock_client({s: closes for s in tb.BRIEF_YAHOO_SYMBOLS}, UP) as client:
-            return await tb.build_morning_brief(client)
-
-    msg = asyncio.run(go())
-    assert "SPY: 102.00 (+2.00% 1d, above 20d avg)" in msg.splitlines()
+    assert "No open positions" in msg
+    assert "deployed $0.00 (0 positions)" in msg
 
 
 # --------------------------------------------------------------------------- night report

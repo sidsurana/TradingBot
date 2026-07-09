@@ -77,6 +77,10 @@ class BotController:
                 "avg_price": round(pos.avg_price, 4),
                 "mark": round(mid, 4) if mid is not None else None,
                 "unrealized_pnl": str(round(pos.unrealized_pnl(mid), 2)) if mid else None,
+                # Resolution time (prediction markets) so reports can flag what's
+                # about to pay out. close_time first, then the Polymarket end_ts.
+                "close_time": pos.market.close_time
+                or pos.market.metadata.get("end_ts") or None,
             })
         return out
 

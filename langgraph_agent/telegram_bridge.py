@@ -234,22 +234,71 @@ def _brief_line(symbol: str, closes: list[float]) -> str:
     return f"{symbol}: {px:,.2f} ({rel} 20d avg)"
 
 
-async def build_morning_brief(client: httpx.AsyncClient) -> str:
-    """Deterministic pre-market snapshot — no LLM call. Every symbol degrades
-    independently to 'X: data unavailable', so the message always sends."""
-    tz = _report_tz()
-    lines = [f"📈 Morning brief — {datetime.now(tz).strftime('%a %d %b %Y')}"]
-    for sym in BRIEF_YAHOO_SYMBOLS:
-        try:
-            lines.append(_brief_line(sym, await _yahoo_daily_closes(client, sym)))
-        except Exception as exc:  # noqa: BLE001 — degrade per symbol
-            print(f"morning-brief {sym} error:", exc)
-            lines.append(f"{sym}: data unavailable")
+def _hours_to(close_time, now_ts: float) -> float | None:
+    """Hours from now until a position's resolution, or None if unknown."""
     try:
-        lines.append(_brief_line("BTC-USD", await _coinbase_daily_closes(client)))
+        return (float(close_time) - now_ts) / 3600.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_horizon(hours: float | None) -> str:
+    if hours is None:
+        return "resolution TBD"
+    if hours < 0:
+        return "resolving now"
+    if hours < 48:
+        return f"~{hours:.0f}h to resolve"
+    return f"~{hours / 24:.0f}d to resolve"
+
+
+async def build_morning_brief(client: httpx.AsyncClient) -> str:
+    """Certainty-carry book snapshot to start the day — no LLM call. Reads the
+    live control API (/portfolio + /positions) and lists open carry positions
+    soonest-to-resolve first, so you can see what's about to pay out. Degrades
+    to a clear 'engine offline' line if the API is unreachable; always sends."""
+    tz = _report_tz()
+    now_ts = datetime.now(tz).timestamp()
+    lines = [f"🌅 Morning brief — {datetime.now(tz).strftime('%a %d %b %Y')}",
+             "Certainty Carry book"]
+    headers = {"Authorization": f"Bearer {BOT_API_TOKEN}"}
+    pf, pos, pos_ok = None, None, False
+    try:
+        pf = (await client.get(f"{BOT_API_URL}/portfolio", headers=headers, timeout=15)).json()
+    except Exception as exc:  # noqa: BLE001 — engine may be down at 07:30
+        print("morning-brief portfolio fetch error:", exc)
+    try:
+        pos = (await client.get(f"{BOT_API_URL}/positions", headers=headers, timeout=15)).json()
+        pos_ok = isinstance(pos, list)
     except Exception as exc:  # noqa: BLE001
-        print("morning-brief BTC-USD error:", exc)
-        lines.append("BTC-USD: data unavailable")
+        print("morning-brief positions fetch error:", exc)
+
+    if not (isinstance(pf, dict) and pf):
+        lines.append("⚠️ Engine offline — control API unreachable.")
+        return "\n".join(lines)
+
+    equity = float(pf.get("equity", 0) or 0)
+    cash = float(pf.get("cash", 0) or 0)
+    deployed = equity - cash
+    lines.append(f"Equity ${equity:.2f} | cash ${cash:.2f} | "
+                 f"deployed ${deployed:.2f} ({pf.get('open_position_count', 0)} positions)")
+
+    if not pos_ok:
+        lines.append("⚠️ Positions unavailable (API error).")
+        return "\n".join(lines)
+    if not pos:
+        lines.append("No open positions — scanning for in-band markets.")
+        return "\n".join(lines)
+
+    ranked = sorted(pos, key=lambda p: (_hours_to(p.get("close_time"), now_ts)
+                                        if _hours_to(p.get("close_time"), now_ts) is not None
+                                        else float("inf")))
+    lines.append("Positions (soonest to resolve first):")
+    for p in ranked:
+        title = (p.get("title") or p.get("market", ""))[:48]
+        horizon = _fmt_horizon(_hours_to(p.get("close_time"), now_ts))
+        lines.append(f"• {title} [{p.get('outcome', '')}]: {p.get('size')} @ "
+                     f"{p.get('avg_price')}, now {p.get('mark')} — {horizon}")
     return "\n".join(lines)
 
 
