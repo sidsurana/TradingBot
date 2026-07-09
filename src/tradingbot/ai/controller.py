@@ -69,9 +69,14 @@ class BotController:
                 continue
             mark = books.get(pos.market.key)
             mid = mark.mid if mark else None
+            # Prefer the engine's registry copy of the market: positions restored
+            # from persistence carry a metadata-less Market (the store doesn't
+            # persist end_ts), but discovery keeps a metadata-rich copy keyed the
+            # same, so resolution timing survives a restart.
+            mkt = self.engine._market_registry.get(pos.market.key, pos.market)
             out.append({
                 "market": pos.market.key,
-                "title": pos.market.title,
+                "title": mkt.title or pos.market.title,
                 "outcome": pos.market.outcome,
                 "size": str(pos.size),
                 "avg_price": round(pos.avg_price, 4),
@@ -79,8 +84,7 @@ class BotController:
                 "unrealized_pnl": str(round(pos.unrealized_pnl(mid), 2)) if mid else None,
                 # Resolution time (prediction markets) so reports can flag what's
                 # about to pay out. close_time first, then the Polymarket end_ts.
-                "close_time": pos.market.close_time
-                or pos.market.metadata.get("end_ts") or None,
+                "close_time": mkt.close_time or mkt.metadata.get("end_ts") or None,
             })
         return out
 
