@@ -11,24 +11,37 @@ from __future__ import annotations
 import abc
 from collections.abc import Sequence
 
-from tradingbot.models import Market, Order, OrderBook, Position
+from tradingbot.models import Candle, Market, Order, OrderBook, Position
 
 
 class Context:
-    """Read-only snapshot handed to a strategy each tick."""
+    """Read-only snapshot handed to a strategy each tick.
+
+    `candles` is optional history for candle-driven (directional) strategies:
+    market_key -> interval ("15m"/"1h"/"4h") -> bars oldest-first, last bar
+    possibly in-progress. Prediction-market strategies ignore it. `equity` is
+    the portfolio's current marked equity (0.0 when unknown) for sizing.
+    """
 
     def __init__(
         self,
         markets: Sequence[Market],
         books: dict[str, OrderBook],
         positions: dict[str, Position],
+        candles: dict[str, dict[str, tuple[Candle, ...]]] | None = None,
+        equity: float = 0.0,
     ):
         self.markets = markets
         self.books = books
         self.positions = positions
+        self.candles = candles or {}
+        self.equity = equity
 
     def book(self, market: Market) -> OrderBook | None:
         return self.books.get(market.key)
+
+    def candles_for(self, market: Market, interval: str) -> tuple[Candle, ...]:
+        return self.candles.get(market.key, {}).get(interval, ())
 
 
 class Strategy(abc.ABC):

@@ -19,6 +19,7 @@ Close when pnl_fraction <= -stop_loss_pct, or pnl_fraction >= take_profit_pct.
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 
 import structlog
@@ -32,6 +33,10 @@ log = structlog.get_logger(__name__)
 class ExitManager:
     def __init__(self, settings: ExitSettings):
         self.settings = settings
+        # In-flight tracking: market_key -> ts of the last emitted exit. Without
+        # this, a full-size flatten is re-emitted every tick until the first one
+        # fills, over-closing and flipping the position live.
+        self._last_emit: dict[str, float] = {}
 
     @property
     def active(self) -> bool:
@@ -44,7 +49,13 @@ class ExitManager:
         if not self.active:
             return []
         orders: list[Order] = []
+        now = time.time()
         for key, pos in positions.items():
+            if pos.size == 0:
+                # Position flattened: forget the cooldown so a future position
+                # in this market gets a fresh exit immediately.
+                self._last_emit.pop(key, None)
+                continue
             if abs(pos.size) < self.settings.min_size_to_exit or pos.avg_price <= 0:
                 continue
             book = books.get(key)
@@ -52,8 +63,15 @@ class ExitManager:
             if mark is None:
                 continue
             order = self._maybe_exit(pos, book, mark)
-            if order is not None:
-                orders.append(order)
+            if order is None:
+                continue
+            # Per-market cooldown: an exit is presumed in flight; don't re-emit
+            # a duplicate full-size flatten within the cooldown window.
+            last = self._last_emit.get(key)
+            if last is not None and now - last < self.settings.emit_cooldown_s:
+                continue
+            self._last_emit[key] = now
+            orders.append(order)
         return orders
 
     def _maybe_exit(self, pos: Position, book: OrderBook, mark: float) -> Order | None:

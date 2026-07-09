@@ -19,6 +19,7 @@ from enum import Enum
 class Venue(str, Enum):
     KALSHI = "kalshi"
     POLYMARKET = "polymarket"
+    DATA = "data"          # directional instruments (equities/crypto/commodities) fed by public market data
     PAPER = "paper"
 
 
@@ -68,6 +69,21 @@ class Market:
     @property
     def key(self) -> str:
         return f"{self.venue.value}:{self.market_id}"
+
+
+@dataclass(frozen=True, slots=True)
+class Candle:
+    """One OHLCV bar. Prices are venue-native units (dollars for DATA-venue
+    instruments — the [0,1] probability convention above applies only to
+    prediction-market venues). `ts` is the bar OPEN time, unix seconds UTC.
+    The last candle of a series may be in-progress (partial bar)."""
+
+    ts: float
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
 
 
 @dataclass(frozen=True, slots=True)

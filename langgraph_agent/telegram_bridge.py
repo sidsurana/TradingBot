@@ -17,6 +17,12 @@ Env (langgraph_agent/.env):
   ANTHROPIC_API_KEY           the model calls
   TRADINGBOT_API_URL / _TOKEN the bot's control API (already configured)
   LANGGRAPH_CHECKPOINT_DB      thread store (default agent_threads.db)
+  MORNING_BRIEF_TIME          daily deterministic market brief, HH:MM local
+                              (default 07:30; empty disables)
+  EVENING_REPORT_TIME         daily performance report, HH:MM local (default
+                              21:00; empty disables and re-enables the old
+                              rolling-24h P&L report)
+  REPORT_TZ                   IANA tz for the above (empty = system local)
 """
 
 from __future__ import annotations
@@ -27,6 +33,8 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
@@ -68,6 +76,26 @@ PNL_REPORT_INTERVAL_S = int(os.getenv("PNL_REPORT_INTERVAL_S", "86400"))      # 
 PNL_CSV = os.getenv("PNL_HISTORY_FILE", "pnl_history.csv")
 PNL_MARKER = ".pnl_last_report"
 
+# Daily scheduled reports (local time HH:MM; empty string disables either one).
+# The morning brief is fully deterministic (public market data, no LLM call);
+# the night report reuses the control API + pnl_history.csv machinery. While
+# EVENING_REPORT_TIME is set, the old rolling-24h P&L report is suppressed
+# (the hourly CSV snapshots continue).
+MORNING_BRIEF_TIME = os.getenv("MORNING_BRIEF_TIME", "07:30").strip()
+EVENING_REPORT_TIME = os.getenv("EVENING_REPORT_TIME", "21:00").strip()
+REPORT_TZ = os.getenv("REPORT_TZ", "").strip()  # IANA name; empty = system local
+MORNING_MARKER = ".morning_last_brief"
+EVENING_MARKER = ".evening_last_report"
+
+# Morning-brief data sources. Yahoo requires a browser User-Agent or it 429s.
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+COINBASE_CANDLES_URL = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+BRIEF_YAHOO_SYMBOLS = ("SPY", "QQQ", "GC=F", "CL=F")
+_BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+}
+
 AUTOTRADE_PROMPT = (
     "Autonomous trading cycle — assess the live markets and act, staying selective:\n"
     "1. Call get_markets and get_positions for current prices and what we hold.\n"
@@ -94,6 +122,135 @@ def _parse_allowed(raw: str) -> set[int]:
 
 
 ALLOWED = _parse_allowed(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", ""))
+
+
+def _report_tz(tz_name: str | None = None):
+    """Resolve an IANA tz name (default REPORT_TZ) to a tzinfo; empty/invalid
+    falls back to the system local timezone."""
+    name = REPORT_TZ if tz_name is None else tz_name
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001 — bad tz name: fall back to local
+            print(f"unknown REPORT_TZ {name!r}, using system local time")
+    return datetime.now().astimezone().tzinfo
+
+
+def seconds_until(hhmm: str, tz_name: str, now: datetime | None = None) -> float:
+    """Seconds until the next occurrence of local wall-clock HH:MM in tz_name
+    (empty = system local). DST-correct: the difference is taken between epoch
+    timestamps (same-tzinfo datetime subtraction would be naive wall-clock
+    math and miss spring-forward/fall-back hours), so a fire time across a DST
+    gap is the true elapsed seconds. Raises ValueError on a malformed hhmm."""
+    hh_s, _, mm_s = hhmm.partition(":")
+    hh, mm = int(hh_s), int(mm_s)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError(f"bad HH:MM time {hhmm!r}")
+    tz = _report_tz(tz_name)
+    if now is None:
+        now = datetime.now(tz)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=tz)
+    local = now.astimezone(tz)
+    target = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if target.timestamp() <= local.timestamp():
+        target = (local + timedelta(days=1)).replace(hour=hh, minute=mm,
+                                                     second=0, microsecond=0)
+    return max(target.timestamp() - local.timestamp(), 0.0)
+
+
+def _marker_holds(marker_path: str, today: str) -> bool:
+    """True if the marker file already records `today` (report already sent —
+    same restart-safe dedupe idea as .pnl_last_report, keyed by local date)."""
+    try:
+        with open(marker_path) as f:
+            return f.read().strip() == today
+    except OSError:
+        return False
+
+
+def _write_marker(marker_path: str, today: str) -> None:
+    try:
+        with open(marker_path, "w") as f:
+            f.write(today)
+    except OSError as exc:
+        print(f"marker write error ({marker_path}):", exc)
+
+
+async def _yahoo_daily_closes(client: httpx.AsyncClient, symbol: str) -> list[float]:
+    """Daily closes (oldest-first, ~1 month). yfinance first (browser TLS
+    fingerprint — Yahoo 429-blocks plain python HTTP per IP for hours), raw
+    httpx as the fallback."""
+    try:
+        closes = await asyncio.to_thread(_yf_daily_closes, symbol)
+        if closes:
+            return closes
+    except Exception as exc:  # noqa: BLE001 — fall through to raw httpx
+        print(f"yfinance daily closes {symbol} error:", exc)
+    resp = await client.get(
+        YAHOO_CHART_URL.format(symbol=symbol),
+        params={"range": "1mo", "interval": "1d"},
+        headers=_BROWSER_HEADERS, timeout=15,
+    )
+    resp.raise_for_status()
+    result = resp.json()["chart"]["result"][0]
+    closes = [float(c) for c in result["indicators"]["quote"][0]["close"] if c is not None]
+    if not closes:
+        raise ValueError(f"no closes for {symbol}")
+    return closes
+
+
+def _yf_daily_closes(symbol: str) -> list[float]:
+    """Blocking yfinance fetch — run via asyncio.to_thread."""
+    import math
+
+    import yfinance as yf
+
+    df = yf.Ticker(symbol).history(period="1mo", interval="1d", auto_adjust=False)
+    return [float(c) for c in df["Close"].tolist() if not math.isnan(float(c))]
+
+
+async def _coinbase_daily_closes(client: httpx.AsyncClient) -> list[float]:
+    """Daily BTC-USD closes (oldest-first) from Coinbase Exchange candles.
+    Rows are [time, low, high, open, close, volume], newest-first."""
+    resp = await client.get(COINBASE_CANDLES_URL, params={"granularity": 86400}, timeout=15)
+    resp.raise_for_status()
+    rows = sorted(resp.json(), key=lambda r: r[0])
+    closes = [float(r[4]) for r in rows]
+    if not closes:
+        raise ValueError("no BTC candles")
+    return closes
+
+
+def _brief_line(symbol: str, closes: list[float]) -> str:
+    """One compact morning-brief line: last price, 1-day % change, and the
+    price's side of the 20-day SMA. `closes` is oldest-first."""
+    px = closes[-1]
+    window = closes[-20:]
+    rel = "above" if px >= sum(window) / len(window) else "below"
+    if len(closes) >= 2 and closes[-2]:
+        chg = (px - closes[-2]) / closes[-2] * 100
+        return f"{symbol}: {px:,.2f} ({chg:+.2f}% 1d, {rel} 20d avg)"
+    return f"{symbol}: {px:,.2f} ({rel} 20d avg)"
+
+
+async def build_morning_brief(client: httpx.AsyncClient) -> str:
+    """Deterministic pre-market snapshot — no LLM call. Every symbol degrades
+    independently to 'X: data unavailable', so the message always sends."""
+    tz = _report_tz()
+    lines = [f"📈 Morning brief — {datetime.now(tz).strftime('%a %d %b %Y')}"]
+    for sym in BRIEF_YAHOO_SYMBOLS:
+        try:
+            lines.append(_brief_line(sym, await _yahoo_daily_closes(client, sym)))
+        except Exception as exc:  # noqa: BLE001 — degrade per symbol
+            print(f"morning-brief {sym} error:", exc)
+            lines.append(f"{sym}: data unavailable")
+    try:
+        lines.append(_brief_line("BTC-USD", await _coinbase_daily_closes(client)))
+    except Exception as exc:  # noqa: BLE001
+        print("morning-brief BTC-USD error:", exc)
+        lines.append("BTC-USD: data unavailable")
+    return "\n".join(lines)
 
 
 def _strip_markdown(text: str) -> str:
@@ -157,6 +314,15 @@ class SupervisorTelegramBridge:
             if AUTOTRADE_ENABLED:
                 bg.append(asyncio.create_task(self._autotrade_loop(client)))
                 print(f"Autonomous trading ON — assessing every {AUTOTRADE_INTERVAL_S}s.")
+            if MORNING_BRIEF_TIME:
+                bg.append(asyncio.create_task(self._daily_at(
+                    client, MORNING_BRIEF_TIME, MORNING_MARKER, build_morning_brief)))
+                print(f"Morning brief scheduled daily at {MORNING_BRIEF_TIME}.")
+            if EVENING_REPORT_TIME:
+                bg.append(asyncio.create_task(self._daily_at(
+                    client, EVENING_REPORT_TIME, EVENING_MARKER, self._build_night_report)))
+                print(f"Night report scheduled daily at {EVENING_REPORT_TIME} "
+                      "(rolling-24h P&L report suppressed).")
             try:
                 while True:
                     try:
@@ -188,6 +354,77 @@ class SupervisorTelegramBridge:
             except Exception as exc:  # noqa: BLE001
                 print("autotrade error:", exc)
             await asyncio.sleep(AUTOTRADE_INTERVAL_S)
+
+    async def _daily_at(self, client: httpx.AsyncClient, hh_mm: str,
+                        marker_path: str, build_msg) -> None:
+        """Generic once-a-day scheduler: sleep until the next local hh_mm
+        (REPORT_TZ), skip if the marker already holds today's date (restart-safe,
+        same pattern as .pnl_last_report), build the message via the async
+        `build_msg(client)` callable, broadcast, write the marker, repeat."""
+        try:
+            seconds_until(hh_mm, REPORT_TZ)  # validate the schedule up front
+        except (ValueError, TypeError) as exc:
+            print(f"daily report disabled — bad time {hh_mm!r}: {exc}")
+            return
+        while True:
+            await asyncio.sleep(seconds_until(hh_mm, REPORT_TZ))
+            today = datetime.now(_report_tz()).date().isoformat()
+            if _marker_holds(marker_path, today):
+                continue  # already sent today; reschedule for tomorrow
+            try:
+                msg = await build_msg(client)
+            except Exception as exc:  # noqa: BLE001 — never kill the loop
+                print(f"daily report build error ({marker_path}):", exc)
+                continue
+            delivered = False
+            for chat_id in self.allowed:
+                delivered = await self._send(client, chat_id, msg) or delivered
+            # Only mark the day done when someone actually received it — a
+            # network blip at fire time must leave the restart-recovery path
+            # open instead of silently losing the day's report.
+            if delivered:
+                _write_marker(marker_path, today)
+
+    async def _build_night_report(self, client: httpx.AsyncClient) -> str:
+        """Nightly performance report: live equity/cash/session PnL from the
+        control API plus the equity-curve summary and open positions. Falls back
+        to whatever pnl_history.csv offers when the engine is offline."""
+        headers = {"Authorization": f"Bearer {BOT_API_TOKEN}"}
+        pf, pos, pos_ok = None, None, False
+        try:
+            pf = (await client.get(f"{BOT_API_URL}/portfolio", headers=headers, timeout=15)).json()
+        except Exception as exc:  # noqa: BLE001 — engine may be down at 21:00
+            print("night-report fetch error:", exc)
+        # Separate try: a /positions failure must not be reported as "flat".
+        try:
+            pos = (await client.get(f"{BOT_API_URL}/positions", headers=headers, timeout=15)).json()
+            pos_ok = isinstance(pos, list)
+        except Exception as exc:  # noqa: BLE001
+            print("night-report positions fetch error:", exc)
+        tz = _report_tz()
+        lines = [f"🌙 Night report — {datetime.now(tz).strftime('%a %d %b %Y')}"]
+        if isinstance(pf, dict) and pf:
+            eq = float(pf.get("equity", 0) or 0)
+            lines.append(self._daily_report(eq))
+            if pos_ok and pos:
+                lines.append(_format_positions(pf, pos))
+            elif pos_ok:
+                lines.append("No open positions.")
+            else:
+                lines.append("⚠️ Positions unavailable (API error).")
+        else:
+            lines.append("⚠️ Engine offline — control API unreachable.")
+            rows = []
+            try:
+                with open(PNL_CSV) as f:
+                    rows = [r for r in csv.DictReader(f)]
+            except OSError:
+                pass
+            if rows:
+                lines.append(self._daily_report(float(rows[-1]["equity"])))
+            else:
+                lines.append("No P&L history yet.")
+        return "\n".join(lines)
 
     async def _position_updates(self, client: httpx.AsyncClient) -> None:
         """Every POSITION_UPDATE_INTERVAL_S, push a summary of open positions to the
@@ -246,11 +483,13 @@ class SupervisorTelegramBridge:
             except OSError as exc:
                 print("pnl-tracker csv error:", exc)
             # Daily report when due (marker-based so restarts don't double-send).
+            # Superseded by the scheduled night report when EVENING_REPORT_TIME is
+            # set — the hourly CSV snapshots above always continue regardless.
             try:
                 last = float(open(PNL_MARKER).read().strip())
             except (OSError, ValueError):
                 last = 0.0
-            if ts - last >= PNL_REPORT_INTERVAL_S:
+            if not EVENING_REPORT_TIME and ts - last >= PNL_REPORT_INTERVAL_S:
                 msg = self._daily_report(eq)
                 for chat_id in self.allowed:
                     await self._send(client, chat_id, msg)
@@ -336,15 +575,22 @@ class SupervisorTelegramBridge:
                          "Please send that again.")
         await self._send(client, chat_id, reply)
 
-    async def _send(self, client: httpx.AsyncClient, chat_id: int, text: str) -> None:
+    async def _send(self, client: httpx.AsyncClient, chat_id: int, text: str) -> bool:
+        """Returns True only if every chunk was accepted by Telegram — callers
+        that must not lose a message (the daily reports) key their sent-marker
+        off this instead of assuming delivery."""
+        ok = True
         for chunk in (text[i:i + 3800] for i in range(0, len(text), 3800)) or [text]:
             try:
-                await client.post(
+                resp = await client.post(
                     API.format(token=BOT_TOKEN, method="sendMessage"),
                     json={"chat_id": chat_id, "text": chunk},
                 )
+                resp.raise_for_status()
             except Exception as exc:  # noqa: BLE001
                 print("send error:", exc)
+                ok = False
+        return ok
 
     async def _send_action(self, client: httpx.AsyncClient, chat_id: int, action: str) -> None:
         try:

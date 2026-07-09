@@ -30,6 +30,12 @@ class UniverseSelector:
         watchlist = set(s.watchlist)
         categories = {c.lower() for c in s.categories}
 
+        # Synthetic (DATA-venue) instruments are already a hand-picked universe;
+        # prediction-market curation (category/watchlist/volume/top-N) doesn't
+        # apply, so they always survive selection.
+        keep = [m for m in markets if m.metadata.get("synthetic")]
+        markets = [m for m in markets if not m.metadata.get("synthetic")]
+
         filtered: list[Market] = []
         for m in markets:
             if watchlist and not (m.market_id in watchlist or m.event_id in watchlist):
@@ -47,7 +53,7 @@ class UniverseSelector:
         for m in filtered:
             by_venue[m.venue].append(m)
 
-        out: list[Market] = []
+        out: list[Market] = list(keep)
         for venue, group in by_venue.items():
             group.sort(key=self._volume, reverse=True)
             out += group[: s.max_per_venue]

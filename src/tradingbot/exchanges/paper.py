@@ -137,8 +137,15 @@ class PaperExchange(Exchange):
             order.status = OrderStatus.REJECTED
             order.reason = "no liquidity at limit"
             return
+        # Running average across ALL fills of this order, not just this batch —
+        # a resting order can partially fill on several ticks.
+        prev_notional = (
+            Decimal(str(order.avg_fill_price)) * order.filled_size
+            if order.avg_fill_price is not None
+            else Decimal(0)
+        )
         order.filled_size += filled
-        order.avg_fill_price = float(notional / filled)
+        order.avg_fill_price = float((prev_notional + notional) / order.filled_size)
         order.status = OrderStatus.FILLED if order.remaining <= 0 else OrderStatus.PARTIAL
 
     def _book_fill(self, order: Order, size: Decimal, price: float) -> None:

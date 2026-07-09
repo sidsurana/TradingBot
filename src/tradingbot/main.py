@@ -44,13 +44,26 @@ def _setup_logging(level: str) -> None:
 
 
 def build_engine(settings: Settings) -> Engine:
-    venues = {
-        Venue.KALSHI: KalshiExchange(settings.kalshi),
-        Venue.POLYMARKET: PolymarketExchange(settings.polymarket),
-    }
+    venues = {}
+    data_feed = None
+    if settings.datafeed.enabled:
+        from tradingbot.exchanges.marketdata import MarketDataExchange
+
+        data_feed = MarketDataExchange(settings.datafeed)
+        venues[Venue.DATA] = data_feed
+    if not (settings.datafeed.enabled and settings.datafeed.only):
+        venues[Venue.KALSHI] = KalshiExchange(settings.kalshi)
+        venues[Venue.POLYMARKET] = PolymarketExchange(settings.polymarket)
     router = ExchangeRouter(venues)
     strategies = [_build_strategy(name, settings) for name in settings.enabled_strategies]
-    return Engine(settings, router, strategies, stream=_build_stream(settings))
+    # Streaming is a prediction-market feature; in data-only mode there is
+    # nothing to stream and the engine runs on the REST/cache tick.
+    stream = None if (settings.datafeed.enabled and settings.datafeed.only) \
+        else _build_stream(settings)
+    engine = Engine(settings, router, strategies, stream=stream)
+    if data_feed is not None:
+        engine.candle_source = data_feed.candles_snapshot
+    return engine
 
 
 def _build_strategy(name: str, settings: Settings):
@@ -65,6 +78,12 @@ def _build_strategy(name: str, settings: Settings):
         return build(name, kelly_fraction=sg.kelly_fraction, bankroll=sg.bankroll,
                      min_edge=sg.min_edge, min_confidence=sg.min_confidence,
                      max_signal_age_s=sg.max_signal_age_s, max_position=sg.max_position)
+    if name == "mean_reversion":
+        return build(name, cfg=settings.mean_reversion, sizing=settings.sizing)
+    if name == "breakout":
+        return build(name, cfg=settings.breakout, sizing=settings.sizing)
+    if name == "trend":
+        return build(name, cfg=settings.trend, sizing=settings.sizing)
     return build(name)
 
 
@@ -80,8 +99,15 @@ def _build_stream(settings: Settings):
     if settings.kalshi.configured:
         from tradingbot.exchanges.kalshi_auth import load_signer
 
-        signer = load_signer(settings.kalshi.api_key_id, settings.kalshi.private_key_path)
-        clients.append(KalshiStream(settings.kalshi, signer))
+        # A bad key path must degrade to "no Kalshi stream", not kill the process:
+        # launchd KeepAlive turns a startup raise here into an infinite crash loop.
+        try:
+            signer = load_signer(settings.kalshi.api_key_id, settings.kalshi.private_key_path)
+            clients.append(KalshiStream(settings.kalshi, signer))
+        except OSError as exc:
+            structlog.get_logger("tradingbot").error(
+                "kalshi.signer_unavailable_skipping_stream",
+                path=settings.kalshi.private_key_path, error=str(exc))
     return StreamManager(clients)
 
 

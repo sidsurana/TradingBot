@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 signal = ["pandas>=2.2", "numpy>=1.26", "scikit-learn>=1.5"]
+data = ["yfinance>=0.2.50"]          # DATA venue: browser-TLS Yahoo fetch (429 shield)
 agent = ["anthropic>=0.49"]          # Claude brain (Telegram uses the core httpx dep)
 live = ["cryptography>=42.0",        # Kalshi RSA request signing
         "py-clob-client>=0.17"]      # Polymarket EIP-712 order signing

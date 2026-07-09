@@ -98,9 +98,17 @@ class Engine:
                 self.portfolio.record_fill(market, fill, log_fill=False)
             open_positions = [p for p in self.portfolio.positions.values() if p.size != 0]
             if restored:
+                # Replay restored LIFETIME PnL; re-baseline so max_daily_loss
+                # measures this session, not all history since first launch.
+                self.portfolio.rebaseline_session(self.portfolio.equity({}))
                 log.info("persistence.restored", fills=len(restored),
                          open_positions=len(open_positions),
                          cash=str(round(self.portfolio.cash, 2)))
+        # Optional candle provider for directional strategies: a zero-arg
+        # callable returning market_key -> interval -> tuple[Candle, ...]
+        # (a cheap snapshot of the data venue's in-memory cache). Set by
+        # main.py when the DATA venue is wired.
+        self.candle_source = None
         self.paused = False          # agent/operator can halt order placement live
         self.last_books: dict[str, OrderBook] = {}  # latest snapshot, for introspection
         self.manual_orders: list = []  # discretionary orders queued by the agent/operator
@@ -220,8 +228,7 @@ class Engine:
             # open no new strategy positions and pull all quotes.
             if not self.paused:
                 await self._run_strategies(books)
-                await self._reconcile_quotes(Context(self.markets, books, self.portfolio.positions),
-                                             books)
+                await self._reconcile_quotes(self._ctx(books), books)
             else:
                 await self._cancel_all_quotes()
 
@@ -241,12 +248,16 @@ class Engine:
             if self._paper is not None:
                 self._paper.match_resting(books)
             await self._run_strategies(books)
-            await self._reconcile_quotes(Context(self.markets, books, self.portfolio.positions),
-                                         books, only_keys=dirty)
+            await self._reconcile_quotes(self._ctx(books), books, only_keys=dirty)
             self._drain_fills()
 
+    def _ctx(self, books: dict[str, OrderBook]) -> Context:
+        candles = self.candle_source() if self.candle_source is not None else None
+        return Context(self.markets, books, self.portfolio.positions,
+                       candles=candles, equity=float(self.portfolio.equity(books)))
+
     async def _run_strategies(self, books: dict[str, OrderBook]) -> None:
-        ctx = Context(self.markets, books, self.portfolio.positions)
+        ctx = self._ctx(books)
         desired = []
         for strat in self.strategies:
             try:

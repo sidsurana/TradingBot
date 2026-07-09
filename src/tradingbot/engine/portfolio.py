@@ -22,6 +22,14 @@ class Portfolio:
         self.positions: dict[str, Position] = {}
         self._session_start_equity = starting_cash
 
+    def rebaseline_session(self, equity: Decimal) -> None:
+        """Reset the session-PnL baseline to the given equity.
+
+        Called after persistence replay at startup (so restored lifetime PnL
+        doesn't count against today's max_daily_loss) and by the risk manager
+        on UTC day rollover (so 'daily loss' means daily)."""
+        self._session_start_equity = equity
+
     def position(self, market: Market) -> Position:
         return self.positions.setdefault(market.key, Position(market=market))
 

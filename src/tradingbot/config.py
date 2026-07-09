@@ -21,6 +21,12 @@ class RiskLimits(BaseSettings):
     max_gross_notional: Decimal = Decimal(500)        # max $ across the book
     max_daily_loss: Decimal = Decimal(50)             # kill-switch threshold ($)
     max_orders_per_min: int = 60                      # crude rate guard
+    # Correlation filter: groups of market keys (e.g. [["data:SPY","data:QQQ"]])
+    # that may not hold same-direction exposure simultaneously. An order that
+    # would OPEN or EXTEND a position in the same direction as an existing
+    # nonzero position in another member of its group is rejected; reducing/
+    # closing orders always pass.
+    correlation_groups: list[list[str]] = Field(default_factory=list)
 
 
 class ExitSettings(BaseSettings):
@@ -37,6 +43,7 @@ class ExitSettings(BaseSettings):
     stop_loss_pct: float = 0.0
     take_profit_pct: float = 0.0
     min_size_to_exit: Decimal = Decimal(1)   # ignore dust positions
+    emit_cooldown_s: float = 30.0            # min seconds between exit re-emits per market
 
 
 class KalshiCreds(BaseSettings):
@@ -184,6 +191,84 @@ class SignalSettings(BaseSettings):
     max_position: Decimal = Decimal(50)  # hard cap on contracts per market
 
 
+class DataFeedSettings(BaseSettings):
+    """The DATA venue: directional instruments (index ETFs, BTC, gold, oil)
+    fed by free public endpoints (Yahoo v8 chart API for equities/commodities,
+    Coinbase Exchange public REST for crypto). Read-only market data — paper
+    execution simulates fills against a synthetic two-sided book around the
+    last price."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_DATA_", env_file=".env", extra="ignore")
+
+    enabled: bool = False
+    only: bool = False               # wire ONLY the data venue (skip Kalshi/Polymarket)
+    equities: list[str] = Field(default_factory=lambda: ["SPY", "QQQ"])
+    crypto: list[str] = Field(default_factory=lambda: ["BTC-USD"])
+    # Front-month futures trade ~23h/day => clean 4h bars (GLD/USO only bar
+    # during equity hours). Swap to ["GLD","USO"] to mirror ETF execution.
+    commodities: list[str] = Field(default_factory=lambda: ["GC=F", "CL=F"])
+    quote_ttl_s: float = 20.0        # cache quotes/books this long (rate-limit shield)
+    history_bars: int = 200          # candles to keep per (symbol, interval)
+    synthetic_spread_bps: float = 2.0  # half-spread applied around last price
+    request_timeout_s: float = 10.0
+
+
+class MeanReversionSettings(BaseSettings):
+    """15m mean reversion on the equity indices: fade stretched moves back to
+    the rolling mean when z-score exceeds entry_z; close at exit_z."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_MR_", env_file=".env", extra="ignore")
+
+    interval: str = "15m"
+    lookback: int = 20               # bars for rolling mean/stddev
+    entry_z: float = 2.0             # |z| to open a fade
+    exit_z: float = 0.3              # |z| at which the snap-back is "done"
+    rsi_period: int = 2              # fast RSI confirmation
+    rsi_oversold: float = 10.0
+    rsi_overbought: float = 90.0
+    min_bars: int = 40               # don't trade before this much history
+
+
+class BreakoutSettings(BaseSettings):
+    """1h momentum breakout on BTC: enter when price closes through the
+    Donchian channel extreme on volume >= volume_mult x average."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_BO_", env_file=".env", extra="ignore")
+
+    interval: str = "1h"
+    channel_period: int = 20         # Donchian lookback
+    volume_period: int = 20
+    volume_mult: float = 1.5         # breakout bar volume vs average
+    min_bars: int = 40
+
+
+class TrendSettings(BaseSettings):
+    """4h trend following on gold/oil: EMA-cross direction with entries on
+    the cross, exits on the opposite cross or the hard stop."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_TREND_", env_file=".env", extra="ignore")
+
+    interval: str = "4h"
+    fast_ema: int = 20
+    slow_ema: int = 50
+    min_bars: int = 120
+
+
+class SizingSettings(BaseSettings):
+    """Volatility-aware position sizing shared by the directional strategies.
+    Risk a fixed fraction of equity per trade; per-unit risk is the larger of
+    the hard stop distance and atr_mult x ATR, so positions shrink when the
+    market is volatile."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_SIZING_", env_file=".env", extra="ignore")
+
+    risk_per_trade_pct: float = 0.005    # fraction of equity risked per trade
+    hard_stop_pct: float = 0.01          # the non-negotiable 1% stop (mirrors TB_EXIT_STOP_LOSS_PCT)
+    atr_period: int = 14
+    atr_mult: float = 1.5
+    max_notional_per_trade: Decimal = Decimal(500)
+
+
 class StreamingSettings(BaseSettings):
     """WebSocket streaming order books — push updates instead of REST polling, so
     data is sub-second fresh and you avoid per-market rate limits. Polymarket's
@@ -242,6 +327,11 @@ class Settings(BaseSettings):
     enabled_strategies: list[str] = Field(default_factory=lambda: ["arbitrage"])
 
     universe: UniverseSettings = Field(default_factory=UniverseSettings)
+    datafeed: DataFeedSettings = Field(default_factory=DataFeedSettings)
+    mean_reversion: MeanReversionSettings = Field(default_factory=MeanReversionSettings)
+    breakout: BreakoutSettings = Field(default_factory=BreakoutSettings)
+    trend: TrendSettings = Field(default_factory=TrendSettings)
+    sizing: SizingSettings = Field(default_factory=SizingSettings)
     links: LinkSettings = Field(default_factory=LinkSettings)
     risk: RiskLimits = Field(default_factory=RiskLimits)
     exits: ExitSettings = Field(default_factory=ExitSettings)
