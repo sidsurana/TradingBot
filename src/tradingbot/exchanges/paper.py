@@ -186,7 +186,14 @@ class PaperExchange(Exchange):
         order.status = OrderStatus.FILLED if order.remaining <= 0 else OrderStatus.PARTIAL
 
     def _book_fill(self, order: Order, size: Decimal, price: float) -> None:
-        fee = Decimal(str(price)) * size * PAPER_FEE_RATE
+        # Polymarket charges the exact protocol taker fee (category-aware,
+        # p*(1-p) shaped); other venues use the simple synthetic per-notional fee.
+        if order.market.venue is Venue.POLYMARKET:
+            from tradingbot.fees import polymarket_taker_fee
+
+            fee = polymarket_taker_fee(price, size, order.market.metadata.get("category"))
+        else:
+            fee = Decimal(str(price)) * size * PAPER_FEE_RATE
         fill = Fill(
             market_key=order.market.key,
             side=order.side,

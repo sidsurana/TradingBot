@@ -90,6 +90,9 @@ def _build_strategy(name: str, settings: Settings):
         return build(name, cfg=settings.trend, sizing=settings.sizing)
     if name == "certainty_carry":
         return build(name, cfg=settings.carry)
+    if name == "arbitrage":
+        a = settings.arbitrage
+        return build(name, min_edge=a.min_edge, max_size=a.max_size)
     return build(name)
 
 

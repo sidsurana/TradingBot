@@ -307,6 +307,28 @@ class CertaintyCarrySettings(BaseSettings):
     allowed_categories: list[str] = Field(default_factory=list)
 
 
+class ArbitrageSettings(BaseSettings):
+    """Dutch-book arbitrage — the one edge here that needs NO probability model.
+
+    Within a complete set of mutually-exclusive outcomes, the cheapest asks must
+    cost >= $1 (one outcome always redeems to $1). When they cost strictly less
+    than $1 after fees, buying one of every outcome locks a risk-free profit —
+    edge by construction, verifiable, no view on 'true probability' required.
+
+    Two guards make it honest rather than a trap: (1) fee-aware — the threshold
+    is cost*(1+fee_rate) < 1, not a hand-wave; (2) leg-risk buffer — min_edge is
+    the net profit required beyond fees, a cushion against the book moving
+    between legs (true atomic fills aren't available on-venue; see the strategy
+    docstring). Loss is already capped by full collateralization, so no stop."""
+
+    model_config = SettingsConfigDict(env_prefix="TB_ARB_", env_file=".env", extra="ignore")
+
+    min_edge: float = 0.01           # required NET profit per $1 set, after fees (leg-risk buffer)
+    max_size: Decimal = Decimal(20)  # units per leg, capped further by min depth across legs
+    # Fees are the exact Polymarket taker model (fees.py: feeRate(category)*p*(1-p)),
+    # not a flat rate — no knob here, it's read per-leg from each market's category.
+
+
 class SettlementSettings(BaseSettings):
     """Paper redemption of resolved prediction-market positions. Resolved
     markets leave the active universe, so held tokens would otherwise strand at
@@ -384,6 +406,7 @@ class Settings(BaseSettings):
     trend: TrendSettings = Field(default_factory=TrendSettings)
     sizing: SizingSettings = Field(default_factory=SizingSettings)
     carry: CertaintyCarrySettings = Field(default_factory=CertaintyCarrySettings)
+    arbitrage: ArbitrageSettings = Field(default_factory=ArbitrageSettings)
     settlement: SettlementSettings = Field(default_factory=SettlementSettings)
     links: LinkSettings = Field(default_factory=LinkSettings)
     risk: RiskLimits = Field(default_factory=RiskLimits)

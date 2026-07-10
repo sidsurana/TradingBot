@@ -79,7 +79,11 @@ def parse_gamma_markets(data: list, venue: Venue, event_filter: str | None = Non
                 title=question or condition, outcome=str(outcome), tick_size=tick,
                 metadata={"volume": volume, "category": category,
                           "is_sports": is_sports, "end_ts": end_ts,
-                          "uma_status": uma_status},
+                          "uma_status": uma_status,
+                          # Ground-truth outcome count so the arbitrage strategy
+                          # can tell a complete mutually-exclusive set from a
+                          # curation-truncated subset (a false dutch book).
+                          "num_outcomes": len(outcomes)},
             ))
     return out
 

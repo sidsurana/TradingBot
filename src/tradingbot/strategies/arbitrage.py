@@ -22,6 +22,7 @@ from decimal import Decimal
 
 import structlog
 
+from tradingbot.fees import taker_fee_per_share
 from tradingbot.models import Market, Order, OrderType, Side
 from tradingbot.strategies.base import Context, Strategy, register
 
@@ -34,7 +35,7 @@ class ArbitrageStrategy(Strategy):
 
     def __init__(self, *, min_edge: float = 0.02, max_size: Decimal = Decimal(20), **params):
         super().__init__(min_edge=min_edge, max_size=max_size, **params)
-        self.min_edge = min_edge
+        self.min_edge = min_edge      # required NET profit per $1 set (leg-risk buffer)
         self.max_size = max_size
 
     def generate(self, ctx: Context) -> list[Order]:
@@ -43,28 +44,65 @@ class ArbitrageStrategy(Strategy):
         orders += self._cross_venue(ctx)
         return orders
 
-    # --- flavor 1: complete-set underpricing -------------------------------
+    # --- flavor 1: complete-set underpricing (dutch book) ------------------
     def _dutch_book(self, ctx: Context) -> list[Order]:
+        """Buy one of every mutually-exclusive outcome when the cheapest asks
+        sum to < $1 after fees. Correctness requires the COMPLETE set: buying a
+        subset (e.g. 3 of 5 candidates) is NOT a locked profit, because a missing
+        outcome could win and pay you zero. So we act only when every distinct
+        outcome of the event currently has a tradeable ask.
+
+        LEG RISK: the engine places the N legs sequentially. In paper mode they
+        fill atomically against one book snapshot, so the set is always complete.
+        LIVE, a partial fill (one leg fills, another's price moves) would leave an
+        incomplete, un-arbitraged set. Mitigations here: (1) min_edge is required
+        NET of fees, a cushion that absorbs small adverse moves between legs;
+        (2) size is capped to the min depth across ALL legs, so every leg can
+        fill at its observed ask. Residual risk (a leg vanishing mid-fire) needs
+        either a venue atomic multi-leg order (Polymarket has none) or engine-
+        level unwind of incomplete sets — required before live capital, and why
+        size stays small. Loss is otherwise capped by full collateralization."""
         by_event: dict[str, list[Market]] = defaultdict(list)
         for m in ctx.markets:
             by_event[m.event_id].append(m)
 
         out: list[Order] = []
         for event_id, legs in by_event.items():
-            # Need each distinct outcome quoted exactly once (cheapest ask).
+            # Cheapest ask per distinct outcome, and whether EVERY outcome of the
+            # event is currently tradeable (has an ask).
             best: dict[str, tuple[Market, float, Decimal]] = {}
+            outcomes_seen: set[str] = set()
+            num_outcomes = 0
             for m in legs:
+                outcomes_seen.add(m.outcome)
+                num_outcomes = max(num_outcomes, int(m.metadata.get("num_outcomes") or 0))
                 book = ctx.book(m)
-                if not book or not book.best_ask:
+                # A tradeable ask must exist and be strictly positive: a None or
+                # 0.0 ask is a data glitch, not free money.
+                if not book or not book.best_ask or not book.best_ask.price:
                     continue
                 ask = book.best_ask
                 cur = best.get(m.outcome)
                 if cur is None or ask.price < cur[1]:
                     best[m.outcome] = (m, ask.price, ask.size)
-            if len(best) < 2:
+            # Incomplete slate -> not a locked set. We must hold one of EVERY
+            # outcome. `num_outcomes` (stamped per leg by the adapter) is the
+            # ground truth: universe curation ranks/truncates individual legs and
+            # can drop one leg of a multi-outcome event, after which the survivors
+            # always sum to < $1 and would look like a locked set — but the dropped
+            # outcome could win and pay us zero. Require every true outcome priced.
+            # Fall back to "all present legs priced" only when the count is unknown.
+            required = num_outcomes if num_outcomes else len(outcomes_seen)
+            if len(best) < 2 or len(best) != required:
                 continue
             cost = sum(p for _, p, _ in best.values())
-            edge = 1.0 - cost
+            # Fee-aware, using Polymarket's exact taker model (fees.py): each leg
+            # pays feeRate(category) * p * (1-p) per share — near-zero at price
+            # extremes, largest mid-book. The winning leg redeems $1 with no fee.
+            fees = sum(taker_fee_per_share(p, m.metadata.get("category"))
+                       for m, p, _ in best.values())
+            net_cost = cost + fees
+            edge = 1.0 - net_cost
             if edge < self.min_edge:
                 continue
             size = min((s for _, _, s in best.values()), default=Decimal(0))
@@ -79,7 +117,7 @@ class ArbitrageStrategy(Strategy):
                     )
                 )
             log.info("arb.dutch_book", event_id=event_id, cost=round(cost, 4),
-                     edge=round(edge, 4), size=str(size))
+                     net_cost=round(net_cost, 4), edge=round(edge, 4), size=str(size))
         return out
 
     # --- flavor 2: same outcome, two venues --------------------------------

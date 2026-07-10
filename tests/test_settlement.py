@@ -10,6 +10,7 @@ from tradingbot.config import PersistenceSettings, Settings, SettlementSettings
 from tradingbot.engine import Engine, ExchangeRouter
 from tradingbot.engine.portfolio import Portfolio
 from tradingbot.exchanges.paper import PaperExchange
+from tradingbot.fees import polymarket_taker_fee
 from tradingbot.models import Order, OrderType, Side, Venue
 from tests.fake_exchange import FakeExchange, book, market
 
@@ -45,7 +46,7 @@ async def test_settle_winner_realizes_gain():
 
     await _fill_buy(paper, poly, 100)          # buy 100 @0.95
     _drain(paper, portfolio, registry)
-    entry_fee = Decimal("0.95") * Decimal(100) * Decimal("0.001")  # 0.095
+    entry_fee = polymarket_taker_fee(0.95, Decimal(100), None)
     assert portfolio.position(poly).size == Decimal(100)
 
     paper.settle(poly, 1.0)                     # redeem winner at $1
@@ -70,7 +71,7 @@ async def test_settle_loser_realizes_loss():
 
     await _fill_buy(paper, poly, 100)          # buy 100 @0.95
     _drain(paper, portfolio, registry)
-    entry_fee = Decimal("0.95") * Decimal(100) * Decimal("0.001")
+    entry_fee = polymarket_taker_fee(0.95, Decimal(100), None)
 
     paper.settle(poly, 0.0)                     # redeem loser at $0
     _drain(paper, portfolio, registry)
@@ -125,7 +126,7 @@ async def test_engine_poll_redeems_resolved_position():
 
     pos = engine.portfolio.position(poly)
     assert pos.size == 0
-    entry_fee = Decimal("0.95") * Decimal(100) * Decimal("0.001")
+    entry_fee = polymarket_taker_fee(0.95, Decimal(100), None)
     assert pos.realized_pnl == pytest.approx(Decimal(5) - entry_fee)
 
 
@@ -191,7 +192,7 @@ async def test_restart_restores_paper_position_and_settles(tmp_path):
     await engine2._settle_once()
     pos = engine2.portfolio.position(poly)
     assert pos.size == 0
-    entry_fee = Decimal("0.95") * Decimal(100) * Decimal("0.001")  # 0.095
+    entry_fee = polymarket_taker_fee(0.95, Decimal(100), None)
     assert pos.realized_pnl == pytest.approx(Decimal(5) - entry_fee)
     assert engine2.portfolio.cash == pytest.approx(Decimal(1000) + Decimal(5) - entry_fee)
 
