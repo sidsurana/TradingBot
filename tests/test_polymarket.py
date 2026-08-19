@@ -92,6 +92,41 @@ def test_parse_gamma_resolutions_only_returns_held_tokens():
     assert res == {"polymarket:yes1": 1.0}  # no1 not held -> absent
 
 
+def test_parse_gamma_resolutions_void_both_outcomes_normalize_to_half():
+    """A VOID/refund reports every outcome at ~1.0. Redemption must NOT pay $1 on
+    both legs of a mutually-exclusive set (that fabricates a $2 payout on a <$1
+    dutch book); it normalizes to $0.50 each so the set redeems exactly $1.
+
+    Seeded with the two real void conditionIds from the arb book that inflated
+    the paper P&L by ~$105: Dota "Vici Gaming vs PlayTime" and tennis
+    "Onclin vs McCabe", both of which resolved with outcomePrices ["1", "1"]."""
+    data = [
+        _gamma_market("0x22ff62a08fc3b84a", ["vici", "playtime"],
+                      ["Vici Gaming", "PlayTime"], uma="resolved", prices=["1", "1"]),
+        _gamma_market("0xfe088b02cc9f951a", ["onclin", "mccabe"],
+                      ["Gauthier Onclin", "James McCabe"], uma="resolved",
+                      prices=["1", "1"]),
+    ]
+    held = {f"polymarket:{t}" for t in ("vici", "playtime", "onclin", "mccabe")}
+    res = parse_gamma_resolutions(data, held)
+    assert res == {
+        "polymarket:vici": 0.5, "polymarket:playtime": 0.5,
+        "polymarket:onclin": 0.5, "polymarket:mccabe": 0.5,
+    }
+    # Invariant: each conditionId's redemptions sum to exactly $1.
+    assert res["polymarket:vici"] + res["polymarket:playtime"] == 1.0
+    assert res["polymarket:onclin"] + res["polymarket:mccabe"] == 1.0
+
+
+def test_parse_gamma_resolutions_all_zero_left_unsettled():
+    """An all-zero outcome set carries no redemption signal (total == 0); the
+    market is omitted rather than dividing by zero or booking phantom values."""
+    data = [_gamma_market("c9", ["a", "b"], ["Yes", "No"],
+                          uma="resolved", prices=["0", "0"])]
+    res = parse_gamma_resolutions(data, {"polymarket:a", "polymarket:b"})
+    assert res == {}
+
+
 # --- 2b) fetch_resolutions over a mocked Gamma transport ---------------------
 
 def _held(token: str, cond: str) -> Market:

@@ -89,13 +89,25 @@ def parse_gamma_markets(data: list, venue: Venue, event_filter: str | None = Non
 
 
 def parse_gamma_resolutions(data: list, held_keys: set[str]) -> dict[str, float]:
-    """Map held Polymarket token keys to their redemption value (1.0 winner,
-    0.0 loser) for markets that have FINALLY resolved. Pure (no network).
+    """Map held Polymarket token keys to their redemption value for markets that
+    have FINALLY resolved. Pure (no network).
 
     A market counts as resolved only when umaResolutionStatus == "resolved"
     (empty / "proposed" / "disputed" are non-final and OMITTED) and its
-    outcomePrices array — aligned to outcomes/clobTokenIds — is present. The
-    winning outcome carries a price of ~1.0, the loser ~0.0."""
+    outcomePrices array — aligned to outcomes/clobTokenIds — is present.
+
+    Redemption is NORMALIZED over the whole outcome set so a mutually-exclusive
+    market always pays exactly $1 total: each token redeems at
+    price_i / sum(prices). A clean resolution ([1, 0]) is the identity — winner
+    $1, loser $0. But a VOID/refund, where Gamma reports EVERY outcome at ~1.0
+    (e.g. ["1", "1"] for a cancelled match or a remade game), normalizes to
+    [0.5, 0.5] instead of booking $1 on BOTH legs. Without this, a dutch-book set
+    bought for <$1 would redeem $2 — fabricating impossible arbitrage profit
+    (this is exactly the paper-settlement bug that inflated the arb track record;
+    normalization refunds a void at ~cost, netting ≈ -fees, as a real void does).
+
+    The sum is taken across ALL outcomes of the market, not just held tokens, so
+    a one-sided position still normalizes against the full set."""
     out: dict[str, float] = {}
     for m in data:
         uma = str(m.get("umaResolutionStatus") or "").lower()
@@ -110,15 +122,18 @@ def parse_gamma_resolutions(data: list, held_keys: set[str]) -> dict[str, float]
             continue
         if not ids or not prices or len(prices) < len(ids):
             continue  # missing outcome prices -> can't determine the winner
+        try:
+            price_f = [float(p) for p in prices[: len(ids)]]
+        except (ValueError, TypeError):
+            continue  # unparseable price -> can't settle this market safely
+        total = sum(price_f)
+        if total <= 0.0:
+            continue  # all-zero outcomes -> no redemption signal, leave unsettled
         for i, token_id in enumerate(ids):
             key = f"{Venue.POLYMARKET.value}:{token_id}"
             if key not in held_keys:
                 continue
-            try:
-                p = float(prices[i])
-            except (ValueError, TypeError):
-                continue
-            out[key] = 1.0 if p >= 0.5 else 0.0
+            out[key] = price_f[i] / total  # normalized: Σ redemption over the set == $1
     return out
 
 
