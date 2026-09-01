@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
@@ -33,13 +32,32 @@ except ImportError:  # pragma: no cover
         set_risk_limit, trip_kill_switch,
     )
 
-# One model, shared by all agents. claude-opus-4-8 by default; set
-# LANGGRAPH_MODEL=claude-haiku-4-5 for cheap, frequent runs.
+# One model, shared by all agents. Works with either OpenAI or Anthropic:
+#   LANGGRAPH_MODEL   — model id (e.g. gpt-4o-mini, claude-haiku-4-5)
+#   LANGGRAPH_PROVIDER— optional "openai" | "anthropic"; if unset it's inferred
+#                       from the model id (gpt*/o* -> openai, else anthropic)
+# The key comes from OPENAI_API_KEY or ANTHROPIC_API_KEY accordingly.
 MODEL = os.getenv("LANGGRAPH_MODEL", "claude-haiku-4-5")
 
 
-def _model() -> ChatAnthropic:
+def _provider() -> str:
+    p = os.getenv("LANGGRAPH_PROVIDER", "").strip().lower()
+    if p in ("openai", "anthropic"):
+        return p
+    return "openai" if MODEL.lower().startswith(("gpt", "o1", "o3", "o4", "chatgpt")) else "anthropic"
+
+
+def make_model():
+    """The chat model shared by every agent, per the provider selection above."""
+    if _provider() == "openai":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(model=MODEL, max_tokens=4000)
+    from langchain_anthropic import ChatAnthropic
     return ChatAnthropic(model=MODEL, max_tokens=4000)
+
+
+def _model():
+    return make_model()
 
 
 READ_TOOLS = [get_portfolio, get_positions, get_risk, get_goals, get_markets]

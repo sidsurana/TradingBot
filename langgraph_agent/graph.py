@@ -12,13 +12,12 @@ threads, use run_local.py, which compiles the same graph with a SqliteSaver.
 
 from __future__ import annotations
 
-from langchain_anthropic import ChatAnthropic
 from langgraph.prebuilt import create_react_agent
 
 try:  # works as a package and as a flat LangGraph project dir
-    from .specialists import MODEL, SPECIALISTS
+    from .specialists import SPECIALISTS, make_model
 except ImportError:  # pragma: no cover
-    from specialists import MODEL, SPECIALISTS
+    from specialists import SPECIALISTS, make_model
 
 SUPERVISOR_PROMPT = """\
 You are the supervising agent for an autonomous prediction-markets trading bot
@@ -47,7 +46,7 @@ def build_supervisor(checkpointer=None):
     persistent threads when self-hosting; leave None for LangGraph Platform,
     which injects its own persistence."""
     return create_react_agent(
-        ChatAnthropic(model=MODEL, max_tokens=4000),
+        make_model(),
         SPECIALISTS,
         prompt=SUPERVISOR_PROMPT,
         checkpointer=checkpointer,
