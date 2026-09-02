@@ -1,9 +1,13 @@
 from decimal import Decimal
 
+import pytest
+
+from tests.fake_exchange import book, market
+from tradingbot.fees import kalshi_taker_fee_per_share
 from tradingbot.models import Market, Side, Venue
 from tradingbot.strategies import build
+from tradingbot.strategies.arbitrage import ArbitrageStrategy
 from tradingbot.strategies.base import Context
-from tests.fake_exchange import book, market
 
 
 def mkt(venue, mid, event, outcome="YES", *, category=None, num_outcomes=None):
@@ -147,3 +151,33 @@ def test_dutch_book_complete_three_way_fires():
     dutch = [o for o in strat.generate(_ctx([a, b, c], books)) if "dutch_book" in o.reason]
     assert len(dutch) == 3
     assert all(o.size == Decimal(20) for o in dutch)
+
+
+# --- fee models: Kalshi (0.07*p*(1-p)) vs Polymarket (category rate) ----------
+def test_kalshi_taker_fee_formula():
+    assert kalshi_taker_fee_per_share(0.5) == pytest.approx(0.0175)      # max at mid
+    assert kalshi_taker_fee_per_share(0.9) == pytest.approx(0.07 * 0.9 * 0.1)
+    assert kalshi_taker_fee_per_share(0.1) == pytest.approx(kalshi_taker_fee_per_share(0.9))
+    assert kalshi_taker_fee_per_share(0.0) == 0.0
+    assert kalshi_taker_fee_per_share(1.0) == 0.0
+
+
+def test_leg_fee_dispatches_by_venue():
+    k = mkt(Venue.KALSHI, "K", "E")
+    p_crypto = mkt(Venue.POLYMARKET, "P", "E", category="crypto")     # 0.07
+    p_pol = mkt(Venue.POLYMARKET, "P2", "E", category="politics")     # 0.04
+    assert ArbitrageStrategy._leg_fee(k, 0.5) == pytest.approx(0.0175)          # Kalshi 0.07
+    assert ArbitrageStrategy._leg_fee(p_crypto, 0.5) == pytest.approx(0.07 * 0.25)
+    assert ArbitrageStrategy._leg_fee(p_pol, 0.5) == pytest.approx(0.04 * 0.25)
+
+
+def test_kalshi_dutch_book_nets_fees():
+    # YES 0.60 + NO 0.37 = 0.97 gross edge 0.03; Kalshi fee per leg 0.07*p(1-p)
+    # = 0.0168 + 0.0155 = ~0.0323 > 0.03, so it must NOT fire at min_edge>=0.
+    y = mkt(Venue.KALSHI, "Y", "GAME", "YES", num_outcomes=2)
+    n = mkt(Venue.KALSHI, "N", "GAME", "NO", num_outcomes=2)
+    books = [book(y, bid=0.59, bid_sz=30, ask=0.60, ask_sz=30),
+             book(n, bid=0.36, bid_sz=30, ask=0.37, ask_sz=30)]
+    s = build("arbitrage", min_edge=0.0, max_size=Decimal(10))
+    dutch = [o for o in s.generate(_ctx([y, n], books)) if "dutch_book" in o.reason]
+    assert dutch == []   # 3c gross gap is eaten by ~3.3c of Kalshi taker fees

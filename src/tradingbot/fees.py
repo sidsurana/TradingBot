@@ -47,6 +47,21 @@ def taker_fee_per_share(price: float, category: str | None) -> float:
     return rate * price * (1.0 - price)
 
 
+# Kalshi taker fee — standard series: fee = 0.07 * price * (1 - price) per
+# contract (kalshi.com/fee-schedule). Some series are cheaper or fee-free; 0.07
+# is the standard/highest rate, so using it is conservative for arbitrage
+# (never fire on an underestimated fee). Makers pay less; the arb path takes.
+KALSHI_TAKER_RATE = 0.07
+
+
+def kalshi_taker_fee_per_share(price: float) -> float:
+    """Per-contract Kalshi taker fee in USD, size-independent (for cost
+    thresholds). Standard rate 0.07 * p * (1-p); zero at the price extremes."""
+    if price <= 0.0 or price >= 1.0:
+        return 0.0
+    return KALSHI_TAKER_RATE * price * (1.0 - price)
+
+
 def polymarket_taker_fee(price: float, size: Decimal, category: str | None) -> Decimal:
     """Taker fee in USDC for filling `size` shares at `price`."""
     per_share = taker_fee_per_share(price, category)

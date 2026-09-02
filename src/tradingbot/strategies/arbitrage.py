@@ -22,8 +22,8 @@ from decimal import Decimal
 
 import structlog
 
-from tradingbot.fees import taker_fee_per_share
-from tradingbot.models import Market, Order, OrderType, Side
+from tradingbot.fees import kalshi_taker_fee_per_share, taker_fee_per_share
+from tradingbot.models import Market, Order, OrderType, Side, Venue
 from tradingbot.strategies.base import Context, Strategy, register
 
 log = structlog.get_logger(__name__)
@@ -43,6 +43,13 @@ class ArbitrageStrategy(Strategy):
         orders += self._dutch_book(ctx)
         orders += self._cross_venue(ctx)
         return orders
+
+    @staticmethod
+    def _leg_fee(market: Market, price: float) -> float:
+        """Per-share taker fee for one leg, by venue (Kalshi vs Polymarket)."""
+        if market.venue is Venue.KALSHI:
+            return kalshi_taker_fee_per_share(price)
+        return taker_fee_per_share(price, market.metadata.get("category"))
 
     # --- flavor 1: complete-set underpricing (dutch book) ------------------
     def _dutch_book(self, ctx: Context) -> list[Order]:
@@ -96,11 +103,10 @@ class ArbitrageStrategy(Strategy):
             if len(best) < 2 or len(best) != required:
                 continue
             cost = sum(p for _, p, _ in best.values())
-            # Fee-aware, using Polymarket's exact taker model (fees.py): each leg
-            # pays feeRate(category) * p * (1-p) per share — near-zero at price
-            # extremes, largest mid-book. The winning leg redeems $1 with no fee.
-            fees = sum(taker_fee_per_share(p, m.metadata.get("category"))
-                       for m, p, _ in best.values())
+            # Fee-aware per venue: Kalshi charges 0.07*p*(1-p)/contract; Polymarket
+            # uses its category-dependent taker model. Both are near-zero at the
+            # price extremes and largest mid-book. The winning leg redeems $1 free.
+            fees = sum(self._leg_fee(m, p) for m, p, _ in best.values())
             net_cost = cost + fees
             edge = 1.0 - net_cost
             if edge < self.min_edge:
