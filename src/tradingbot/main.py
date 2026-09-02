@@ -109,11 +109,27 @@ def _build_stream(settings: Settings):
     Kalshi credentials are configured."""
     if not settings.streaming.enabled:
         return None
-    from tradingbot.exchanges.streaming import KalshiStream, PolymarketStream, StreamManager
+    from tradingbot.exchanges.streaming import (
+        KalshiStream,
+        PolymarketStream,
+        PolymarketUSStream,
+        StreamManager,
+    )
 
-    # Polymarket US has its own WebSocket protocol (not yet wired); when it's the
-    # active venue, skip the .com market stream and let REST fill its books.
-    clients = [] if settings.polymarket_us.configured else [PolymarketStream(settings.polymarket)]
+    # Polymarket US (signed WS) is the active Polymarket stream when configured;
+    # otherwise use the public .com market channel.
+    clients: list = []
+    if settings.polymarket_us.configured:
+        from tradingbot.exchanges.polymarket_us_auth import load_signer as _pm_us_signer
+
+        try:
+            sign = _pm_us_signer(settings.polymarket_us.key_id, settings.polymarket_us.secret_key)
+            clients.append(PolymarketUSStream(settings.polymarket_us, sign))
+        except Exception as exc:  # noqa: BLE001 — degrade to REST-fill, never crash-loop
+            structlog.get_logger("tradingbot").error(
+                "polymarket_us.signer_unavailable_skipping_stream", error=str(exc))
+    else:
+        clients.append(PolymarketStream(settings.polymarket))
     if settings.kalshi.configured:
         from tradingbot.exchanges.kalshi_auth import load_signer
 

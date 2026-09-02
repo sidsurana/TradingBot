@@ -157,6 +157,36 @@ def parse_polymarket_message(msg: dict, key_by_token: dict[str, str],
                 dirty.add(key)
 
 
+def _pm_us_px(level: dict) -> float:
+    px = level.get("px") or {}
+    return float(px.get("value") or 0)
+
+
+def parse_polymarket_us_message(msg: dict, key_by_slug: dict[str, str],
+                                books: dict[str, LocalBook], dirty: set | None = None) -> None:
+    """Apply a Polymarket US market-data WS frame. Every frame is a FULL order
+    book snapshot (no deltas), so we replace the book each time:
+
+      {subscriptionType:"SUBSCRIPTION_TYPE_MARKET_DATA", marketData:{marketSlug,
+        bids:[{px:{value,currency},qty}], offers:[{px:{value},qty}]}}
+
+    Prices are already probabilities in [0,1]. Heartbeats / acks (no marketData)
+    are ignored.
+    """
+    md = msg.get("marketData")
+    if not md:
+        return
+    key = key_by_slug.get(md.get("marketSlug"))
+    if key is None:
+        return
+    book = books.setdefault(key, LocalBook(key))
+    bids = [(_pm_us_px(b), b.get("qty")) for b in md.get("bids", [])]
+    asks = [(_pm_us_px(a), a.get("qty")) for a in md.get("offers", [])]
+    book.set_snapshot(bids, asks)
+    if dirty is not None:
+        dirty.add(key)
+
+
 class StreamManager:
     """Owns the live LocalBooks and the per-venue client tasks."""
 
@@ -298,4 +328,48 @@ class PolymarketStream(StreamClient):
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.warning("polymarket_stream.reconnect", error=str(exc))
+                await asyncio.sleep(3)
+
+
+class PolymarketUSStream(StreamClient):
+    """Polymarket US market-data WebSocket (api.polymarket.us). Signed handshake
+    (same X-PM headers as REST), full-snapshot frames, heartbeats. Subscriptions
+    are capped at 100 markets each, so the universe is sent in chunks."""
+
+    venue = Venue.POLYMARKET
+
+    def __init__(self, creds, signer=None):
+        self._creds = creds
+        self._signer = signer  # (method, path) -> auth headers; required for the handshake
+
+    async def run(self, markets, books, notify=None) -> None:
+        import websockets
+
+        path = "/v1/ws/markets"
+        url = self._creds.base_url.replace("https://", "wss://").replace("http://", "ws://") + path
+        key_by_slug = {m.market_id: m.key for m in markets}
+        slugs = list(key_by_slug)
+        while True:
+            try:
+                headers = self._signer("GET", path) if self._signer else {}
+                async with websockets.connect(url, additional_headers=headers, max_size=None) as ws:
+                    for i in range(0, len(slugs), 100):  # max 100 markets per subscription
+                        await ws.send(json.dumps({"subscribe": {
+                            "requestId": f"md-{i // 100}",
+                            "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
+                            "marketSlugs": slugs[i:i + 100]}}))
+                    log.info("polymarket_us_stream.subscribed", markets=len(slugs))
+                    async for raw in ws:
+                        data = json.loads(raw)
+                        if "heartbeat" in data:
+                            await ws.send(json.dumps({"heartbeat": {}}))
+                            continue
+                        dirty: set = set()
+                        parse_polymarket_us_message(data, key_by_slug, books, dirty)
+                        if dirty and notify:
+                            notify(dirty)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001  reconnect on any drop
+                log.warning("polymarket_us_stream.reconnect", error=str(exc))
                 await asyncio.sleep(3)

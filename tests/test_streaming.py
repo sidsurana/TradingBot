@@ -9,6 +9,7 @@ from tradingbot.exchanges.streaming import (
     StreamManager,
     parse_kalshi_message,
     parse_polymarket_message,
+    parse_polymarket_us_message,
 )
 from tradingbot.models import Venue
 from tradingbot.strategies import build
@@ -90,6 +91,27 @@ def test_parse_kalshi_delta_missing_price_does_not_crash():
          "msg": {"market_ticker": "K1", "side": "no", "delta_fp": "5.00"}},
         key_by_ticker, books)
     assert books["kalshi:K1"].to_order_book().best_ask is None
+
+
+def test_parse_polymarket_us_full_snapshot():
+    # Every .us frame is a full order-book snapshot keyed by marketSlug.
+    books = {}
+    key_by_slug = {"champ-a": "polymarket:champ-a"}
+    parse_polymarket_us_message(
+        {"subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
+         "marketData": {"marketSlug": "champ-a",
+                        "bids": [{"px": {"value": "0.14", "currency": "USD"}, "qty": "1478.0"}],
+                        "offers": [{"px": {"value": "0.16", "currency": "USD"}, "qty": "212.0"}]}},
+        key_by_slug, books)
+    ob = books["polymarket:champ-a"].to_order_book()
+    assert ob.best_bid.price == 0.14 and ob.best_bid.size == Decimal("1478.0")
+    assert ob.best_ask.price == 0.16 and ob.best_ask.size == Decimal("212.0")
+
+
+def test_parse_polymarket_us_heartbeat_ignored():
+    books = {}
+    parse_polymarket_us_message({"heartbeat": {}}, {"s": "k"}, books)
+    assert books == {}
 
 
 def test_parse_polymarket_book_and_price_change():
