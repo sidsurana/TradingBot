@@ -276,17 +276,23 @@ class KalshiExchange(Exchange):
         if order.price is None:
             raise ValueError("Kalshi limit order requires a price")
         order.client_id = order.client_id or uuid.uuid4().hex
+        tif = {"FOK": "fill_or_kill", "IOC": "immediate_or_cancel"}.get(
+            order.time_in_force, "good_till_canceled")
+        # V2 single-book model: side bid = buy YES, ask = sell YES; price is a
+        # fixed-point DOLLAR string in [0,1] (not integer cents); count is
+        # fixed-point too.
         payload = {
             "ticker": order.market.market_id,
             "client_order_id": order.client_id,
-            "side": "yes",  # we normalize NO exposure to the complementary market
-            "action": "buy" if order.side is Side.BUY else "sell",
-            "count": int(order.size),
+            "side": "bid" if order.side is Side.BUY else "ask",
+            "count": f"{float(order.size):.2f}",
             "type": "limit",
-            "yes_price": prob_to_cents(order.price),
+            "price": f"{order.price:.4f}",
+            "time_in_force": tif,
+            "self_trade_prevention_type": "taker_at_cross",
         }
         resp = await self._client.post(
-            ORDERS_PATH, json=payload, headers=self._sign("POST", ORDERS_PATH)
+            ORDERS_V2_PATH, json=payload, headers=self._sign("POST", ORDERS_V2_PATH)
         )
         if resp.status_code >= 400:
             order.status = OrderStatus.REJECTED
@@ -294,20 +300,28 @@ class KalshiExchange(Exchange):
             log.warning("kalshi.order_rejected", reason=order.reason)
             return order
         data = resp.json().get("order", {})
-        order.venue_id = data.get("order_id")
-        order.status = _STATUS.get(data.get("status", ""), OrderStatus.PENDING)
+        order.venue_id = data.get("order_id") or data.get("id")
+        try:
+            filled = Decimal(str(data.get("filled_count") or data.get("fill_count") or 0))
+        except (ValueError, TypeError):
+            filled = Decimal(0)
+        order.status = _STATUS.get(
+            data.get("status", ""), OrderStatus.OPEN if order.venue_id else OrderStatus.PENDING)
         if order.status is OrderStatus.FILLED:
             order.filled_size = order.size
             order.avg_fill_price = order.price
-        log.info("kalshi.order_placed", ticker=order.market.market_id,
-                 venue_id=order.venue_id, status=order.status.value)
+        elif filled > 0:
+            order.filled_size = filled
+            order.avg_fill_price = order.price
+        log.info("kalshi.order_placed", ticker=order.market.market_id, venue_id=order.venue_id,
+                 status=order.status.value, filled=str(order.filled_size))
         return order
 
     async def cancel_order(self, order: Order) -> Order:
         assert self._client is not None and self._sign is not None
         if not order.venue_id:
             return order
-        path = f"{ORDERS_PATH}/{order.venue_id}"
+        path = f"{ORDERS_V2_PATH}/{order.venue_id}"
         resp = await self._client.delete(path, headers=self._sign("DELETE", path))
         if resp.status_code < 400 and not order.is_terminal:
             order.status = OrderStatus.CANCELED
