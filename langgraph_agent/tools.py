@@ -139,6 +139,15 @@ def place_order(venue: str, market_id: str, side: str, size: float, price: float
 
 
 @tool
+def close_all_positions() -> dict:
+    """SENSITIVE. Stage closing ALL open positions at once — a single confirmation
+    token flattens the whole book (sells longs, buys back shorts, at market).
+    Returns a token + summary; call confirm_action only after the user approves.
+    Use when the user says 'close all', 'flatten', 'exit everything', 'sell it all'."""
+    return _post("/actions/close_all")
+
+
+@tool
 def go_live() -> dict:
     """SENSITIVE. Stage switching from paper to real-money trading; returns a token.
     Requires user confirmation. Refuses if no venue credentials are configured."""

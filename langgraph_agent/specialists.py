@@ -19,17 +19,45 @@ from langgraph.prebuilt import create_react_agent
 
 try:  # works as a package and as a flat LangGraph project dir
     from .tools import (
-        cancel_action, confirm_action, deploy_capital, get_goals, get_markets,
-        get_portfolio, get_positions, get_risk, go_live, list_signals, pause_trading,
-        place_order, resume_trading, run_quant_analysis, set_market_signal,
-        set_risk_limit, trip_kill_switch,
+        cancel_action,
+        close_all_positions,
+        confirm_action,
+        deploy_capital,
+        get_goals,
+        get_markets,
+        get_portfolio,
+        get_positions,
+        get_risk,
+        go_live,
+        list_signals,
+        pause_trading,
+        place_order,
+        resume_trading,
+        run_quant_analysis,
+        set_market_signal,
+        set_risk_limit,
+        trip_kill_switch,
     )
 except ImportError:  # pragma: no cover
     from tools import (
-        cancel_action, confirm_action, deploy_capital, get_goals, get_markets,
-        get_portfolio, get_positions, get_risk, go_live, list_signals, pause_trading,
-        place_order, resume_trading, run_quant_analysis, set_market_signal,
-        set_risk_limit, trip_kill_switch,
+        cancel_action,
+        close_all_positions,
+        confirm_action,
+        deploy_capital,
+        get_goals,
+        get_markets,
+        get_portfolio,
+        get_positions,
+        get_risk,
+        go_live,
+        list_signals,
+        pause_trading,
+        place_order,
+        resume_trading,
+        run_quant_analysis,
+        set_market_signal,
+        set_risk_limit,
+        trip_kill_switch,
     )
 
 # One model, shared by all agents. Works with either OpenAI or Anthropic:
@@ -72,7 +100,11 @@ _research = create_react_agent(
         "Use the read tools for live state and run_quant_analysis(skill_name) for "
         "regime_detection, alpha_detection, strategy_generation, drawdown_analysis, "
         "or trade_review. Reason over what it returns and give a concrete, "
-        "quantitative answer. You do NOT place orders. When you reach a genuine "
+        "quantitative answer. When asked what you think / for a view / whether to "
+        "act, TAKE A STANCE: run the relevant skill(s), then give a clear opinion "
+        "and end with a specific recommended action (e.g. 'trim Mariners — near "
+        "resolution, little left to gain' or 'hold the Yamal hedge'). Don't just "
+        "restate the numbers. You do NOT place orders. When you reach a genuine "
         "fair-value view on a market, you MAY push it with set_market_signal "
         "(fair_value + confidence, 0-1) — the signal strategy sizes it by Kelly "
         "within the risk caps. Only signal when you have a real edge view."
@@ -95,11 +127,15 @@ _risk = create_react_agent(
 _execution = create_react_agent(
     _model(),
     [get_portfolio, get_positions, get_markets, pause_trading, resume_trading,
-     place_order, deploy_capital, go_live, confirm_action, cancel_action],
+     place_order, close_all_positions, deploy_capital, go_live, confirm_action,
+     cancel_action],
     prompt=(
         "You are the Execution trader for a prediction-markets trading bot. You can "
         "pause/resume trading and, for explicit operator requests, place specific "
-        "orders, deploy capital, or go live. place_order, deploy_capital, and "
+        "orders, close all positions (flatten the book), deploy capital, or go "
+        "live. For 'close all' / 'flatten' / 'exit everything', use "
+        "close_all_positions (one token flattens the whole book) — do NOT place one "
+        "order per position. place_order, close_all_positions, deploy_capital, and "
         "go_live are SENSITIVE: they return a confirmation token + summary — relay "
         "it, ask the operator to confirm, and only then call confirm_action(token). "
         "Never confirm on your own. Prices are probabilities in (0,1)."
@@ -111,7 +147,8 @@ _portfolio = create_react_agent(
     READ_TOOLS,
     prompt=(
         "You are the Portfolio/PnL reporter for a prediction-markets trading bot. "
-        "Read-only: summarize cash, equity, session PnL, open positions, and "
+        "Read-only: summarize cash, equity, session PnL, ALL-TIME profit "
+        "(all_time_pnl / realized_pnl from get_portfolio), open positions, and "
         "daily/weekly goal pace clearly and concisely. You do not trade or change "
         "anything."
     ),
@@ -142,8 +179,8 @@ def risk_agent(request: str) -> str:
 @tool
 def execution_agent(request: str) -> str:
     """Delegate trading actions to the Execution specialist: pause/resume, place a
-    specific order, deploy capital, or go live (sensitive actions are staged for
-    confirmation). Pass the full instruction."""
+    specific order, close ALL positions (flatten), deploy capital, or go live
+    (sensitive actions are staged for confirmation). Pass the full instruction."""
     return _delegate(_execution, request)
 
 

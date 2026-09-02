@@ -143,6 +143,10 @@ def build_app(controller: BotController, token: str):
         return controller.request_place_order(body.venue, body.market_id, body.side,
                                               body.size, body.price)
 
+    @app.post("/actions/close_all", dependencies=Protected)
+    def close_all() -> dict:
+        return controller.request_close_all()
+
     @app.post("/actions/go_live", dependencies=Protected)
     def go_live() -> dict:
         return controller.request_go_live()

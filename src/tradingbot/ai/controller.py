@@ -28,7 +28,8 @@ from tradingbot.models import Market, Order, OrderType, Side, Venue
 
 log = structlog.get_logger(__name__)
 
-SENSITIVE = {"set_risk_limit", "deploy_capital", "go_live", "trip_kill_switch", "place_order"}
+SENSITIVE = {"set_risk_limit", "deploy_capital", "go_live", "trip_kill_switch",
+             "place_order", "close_all"}
 
 
 @dataclass
@@ -51,12 +52,19 @@ class BotController:
         p = self.engine.portfolio
         books = self.engine.last_books
         open_positions = [pos for pos in p.positions.values() if pos.size != 0]
+        eq = p.equity(books)
+        realized = sum((pos.realized_pnl for pos in p.positions.values()), Decimal(0))
         return {
             "mode": "live" if self.engine.settings.live else "paper",
             "paused": self.engine.paused,
             "cash": str(round(p.cash, 2)),
-            "equity": str(round(p.equity(books), 2)),
+            "equity": str(round(eq, 2)),
             "session_pnl": str(round(p.session_pnl(books), 2)),
+            # All-time profit since inception = equity now minus the original
+            # bankroll; realized is the closed-trade component of it.
+            "all_time_pnl": str(round(eq - p.starting_cash, 2)),
+            "realized_pnl": str(round(realized, 2)),
+            "starting_cash": str(round(p.starting_cash, 2)),
             "open_position_count": len(open_positions),
             "tracked_markets": len(self.engine.markets),
         }
@@ -206,6 +214,18 @@ class BotController:
             f"{side.upper()} {size} {venue}:{market_id} @ {price}",
         )
 
+    def request_close_all(self) -> dict[str, Any]:
+        open_positions = [pos for pos in self.engine.portfolio.positions.values()
+                          if pos.size != 0]
+        if not open_positions:
+            return {"ok": False, "error": "no open positions to close"}
+        legs = "; ".join(
+            f"{'SELL' if pos.size > 0 else 'BUY'} {abs(pos.size)} {pos.market.key}"
+            for pos in open_positions
+        )
+        return self._stage("close_all", {},
+                           f"CLOSE ALL {len(open_positions)} open positions ({legs})")
+
     def request_trip_kill_switch(self) -> dict[str, Any]:
         return self._stage("trip_kill_switch", {},
                            "TRIP KILL-SWITCH: reject all further orders this session")
@@ -248,6 +268,8 @@ class BotController:
             return {"new_max_gross_notional": str(lim.max_gross_notional)}
         if action == "place_order":
             return self._queue_manual_order(args)
+        if action == "close_all":
+            return self._queue_close_all()
         if action == "trip_kill_switch":
             self.engine.risk.kill_switch = True
             return {"kill_switch": True}
@@ -279,6 +301,29 @@ class BotController:
                  size=args["size"], price=args["price"])
         return {"queued": True, "market": key, "side": args["side"],
                 "size": args["size"], "price": args["price"]}
+
+    def _queue_close_all(self) -> dict[str, Any]:
+        """Flatten every open position with a marketable closing order (SELL longs,
+        BUY shorts). The limit price just crosses the book; the executor fills at
+        the real opposite-side prices, so this closes at market, not at 0.01/0.99."""
+        queued = []
+        for pos in list(self.engine.portfolio.positions.values()):
+            if pos.size == 0:
+                continue
+            side = Side.SELL if pos.size > 0 else Side.BUY
+            order = Order(
+                market=pos.market,
+                side=side,
+                size=abs(pos.size),
+                type=OrderType.LIMIT,
+                price=0.01 if side is Side.SELL else 0.99,  # marketable: cross the book
+                reason="close_all",
+            )
+            self.engine.manual_orders.append(order)
+            queued.append({"market": pos.market.key, "side": side.value,
+                           "size": str(abs(pos.size))})
+        log.info("controller.close_all_queued", count=len(queued))
+        return {"queued": len(queued), "orders": queued}
 
     def _record(self, action: str, args: dict, confirmed: bool = False) -> None:
         self.audit.append({"ts": time.time(), "action": action, "args": args,
