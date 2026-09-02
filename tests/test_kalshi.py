@@ -6,6 +6,7 @@ import pytest
 from tradingbot.config import KalshiCreds
 from tradingbot.exchanges.kalshi import (
     KalshiExchange,
+    parse_kalshi_event_markets,
     parse_kalshi_markets,
     parse_kalshi_orderbook,
 )
@@ -48,23 +49,60 @@ def _mkt(ticker, series):
             "volume_24h_fp": "100.00"}
 
 
+def _event(series, mkts, mutually_exclusive=False):
+    return {"event_ticker": series, "mutually_exclusive": mutually_exclusive,
+            "category": "econ", "title": series, "markets": mkts}
+
+
+def _range_mkt(ticker, strike="between"):
+    return {"ticker": ticker, "strike_type": strike, "yes_sub_title": ticker,
+            "yes_ask_dollars": "0.30", "yes_bid_dollars": "0.28", "volume_24h_fp": "50.00"}
+
+
+def test_parse_kalshi_event_markets_stamps_outcomes_for_exhaustive_range_event():
+    # Mutually-exclusive + all range buckets -> exhaustive: distinct outcomes +
+    # num_outcomes so the dutch-book can require the full set.
+    ev = _event("KXGDP-26", [_range_mkt("KXGDP-26-A", "less"),
+                             _range_mkt("KXGDP-26-B", "between"),
+                             _range_mkt("KXGDP-26-C", "greater")],
+                mutually_exclusive=True)
+    legs = parse_kalshi_event_markets(ev, Venue.KALSHI)
+    assert {m.outcome for m in legs} == {"A", "B", "C"}       # distinct outcomes
+    assert all(m.metadata["num_outcomes"] == 3 for m in legs)
+    assert all(m.event_id == "KXGDP-26" for m in legs)
+
+
+def test_parse_kalshi_event_markets_candidate_field_not_dutch_bookable():
+    # Mutually-exclusive but named candidates (custom strike) -> NOT exhaustive:
+    # keep single-YES modeling so it can never form a false dutch-book set.
+    ev = _event("KXPOPE-70", [_range_mkt("KXPOPE-70-A", "custom"),
+                              _range_mkt("KXPOPE-70-B", "custom")],
+                mutually_exclusive=True)
+    legs = parse_kalshi_event_markets(ev, Venue.KALSHI)
+    assert {m.outcome for m in legs} == {"YES"}
+    assert all("num_outcomes" not in m.metadata for m in legs)
+
+
 @pytest.mark.asyncio
 async def test_list_markets_sweeps_configured_series():
-    # Discovery must query each configured series (not the MVE-flooded open list)
-    # and dedupe across them.
-    seen_series = []
+    # Discovery must query each configured series via the events endpoint (not the
+    # MVE-flooded open market list) and dedupe across them.
+    seen_series, seen_paths = [], []
 
     def handler(request: httpx.Request) -> httpx.Response:
         s = request.url.params.get("series_ticker")
         seen_series.append(s)
-        return httpx.Response(200, json={"markets": [_mkt(f"{s}-1", s)], "cursor": ""})
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json={
+            "events": [_event(s, [_mkt(f"{s}-1", s)])], "cursor": ""})
 
     ex = KalshiExchange(KalshiCreds(series=["KXBTCD", "KXFED"]))
     ex._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://test")
     markets = await ex.list_markets()
     await ex._client.aclose()
 
-    assert set(seen_series) == {"KXBTCD", "KXFED"}          # queried by series
+    assert set(seen_series) == {"KXBTCD", "KXFED"}           # queried by series
+    assert all(p.endswith("/events") for p in seen_paths)    # via events endpoint
     assert sorted(m.market_id for m in markets) == ["KXBTCD-1", "KXFED-1"]
 
 
@@ -75,14 +113,15 @@ async def test_list_markets_event_filter_overrides_series():
     def handler(request: httpx.Request) -> httpx.Response:
         s = request.url.params.get("series_ticker")
         seen_series.append(s)
-        return httpx.Response(200, json={"markets": [_mkt(f"{s}-1", s)], "cursor": ""})
+        return httpx.Response(200, json={
+            "events": [_event(s, [_mkt(f"{s}-1", s)])], "cursor": ""})
 
     ex = KalshiExchange(KalshiCreds(series=["KXBTCD", "KXFED"]))
     ex._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://test")
     markets = await ex.list_markets(event_filter="KXNFLGAME")
     await ex._client.aclose()
 
-    assert seen_series == ["KXNFLGAME"]                     # single series, ignores default set
+    assert seen_series == ["KXNFLGAME"]                      # single series, ignores default set
     assert [m.market_id for m in markets] == ["KXNFLGAME-1"]
 
 

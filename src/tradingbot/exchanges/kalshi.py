@@ -72,6 +72,74 @@ def parse_kalshi_markets(markets: list, venue: Venue) -> list[Market]:
     return out
 
 
+# Strike types whose markets tile a numeric line into a partition. A
+# mutually-exclusive event built from ONLY these is collectively exhaustive —
+# exactly one bucket resolves YES — so buying one of every outcome for < $1 is a
+# genuine locked set. Named-candidate events (strike_type "custom"/None) are NOT
+# exhaustive: an unlisted outcome can win, so their YES legs summing < $1 is a
+# false dutch book that can lose the whole stake. We only stamp dutch-book
+# outcomes for events that pass this gate.
+_RANGE_STRIKE_TYPES = {"between", "greater", "less",
+                       "greater_or_equal", "less_or_equal"}
+
+
+def event_is_exhaustive(event: dict) -> bool:
+    """True iff this event is a safe dutch-book set: mutually exclusive AND
+    collectively exhaustive (every leg is a numeric range/bucket)."""
+    if not event.get("mutually_exclusive"):
+        return False
+    markets = event.get("markets") or []
+    if len(markets) < 2:
+        return False
+    types = {str(m.get("strike_type")) for m in markets}
+    return bool(types) and types.issubset(_RANGE_STRIKE_TYPES)
+
+
+def parse_kalshi_event_markets(event: dict, venue: Venue) -> list[Market]:
+    """Turn one Kalshi event (with nested markets) into Market legs. For an
+    exhaustive mutually-exclusive event, each nested market is a DISTINCT outcome
+    of the same event: give it a unique `outcome` and stamp `num_outcomes` so the
+    arbitrage strategy can require the COMPLETE set before locking a dutch book.
+    For every other event, keep the single-YES modeling (outcome="YES", no
+    `num_outcomes`) so those legs can never form a (false) dutch-book set."""
+    markets = event.get("markets") or []
+    event_ticker = event.get("event_ticker", "")
+    category = (event.get("category") or "").lower()
+    exhaustive = event_is_exhaustive(event)
+    n = len(markets)
+    out: list[Market] = []
+    for m in markets:
+        ticker = m.get("ticker")
+        if not ticker:
+            continue
+        meta: dict = {
+            "volume": float(m.get("volume_24h_fp")
+                            or m.get("volume_fp")
+                            or m.get("volume") or 0),
+            "category": category,
+            "raw": m,
+        }
+        if exhaustive:
+            # Ticker suffix is unique within the event -> guarantees distinct
+            # outcome keys (a collision would just make the set look incomplete
+            # and skip, never a false lock).
+            outcome = ticker.rsplit("-", 1)[-1]
+            meta["num_outcomes"] = n
+        else:
+            outcome = "YES"
+        out.append(Market(
+            venue=venue,
+            market_id=ticker,
+            event_id=event_ticker or ticker,
+            title=m.get("title") or event.get("title") or ticker,
+            outcome=str(outcome),
+            tick_size=0.01,
+            min_size=Decimal(1),
+            metadata=meta,
+        ))
+    return out
+
+
 def cents_to_prob(cents: int) -> float:
     return cents / 100.0
 
@@ -149,23 +217,27 @@ class KalshiExchange(Exchange):
         return list(out.values())
 
     async def _list_series(self, series_ticker: str, cap: int) -> list[Market]:
-        """Fetch open markets for one series, paginating by cursor up to `cap`.
-        Bounded pages/attempts so a persistent 429 can't wedge discovery."""
+        """Fetch open markets for one series via the EVENTS endpoint (nested
+        markets), so event grouping + mutual-exclusivity is preserved and the
+        dutch-book can see complete outcome sets. Paginates by cursor up to `cap`;
+        bounded pages/attempts so a persistent 429 can't wedge discovery."""
         markets: list[Market] = []
         cursor: str | None = None
         pages = attempts = 0
-        while len(markets) < cap and pages < 5 and attempts < 10:
+        while len(markets) < cap and pages < 6 and attempts < 12:
             attempts += 1
-            params: dict = {"series_ticker": series_ticker, "status": "open", "limit": 200}
+            params: dict = {"series_ticker": series_ticker, "status": "open",
+                            "with_nested_markets": "true", "limit": 200}
             if cursor:
                 params["cursor"] = cursor
-            resp = await self._client.get("/trade-api/v2/markets", params=params)
+            resp = await self._client.get("/trade-api/v2/events", params=params)
             if resp.status_code == 429:
                 await asyncio.sleep(1.0)
                 continue
             resp.raise_for_status()
             body = resp.json()
-            markets += parse_kalshi_markets(body.get("markets", []), self.venue)
+            for event in body.get("events", []):
+                markets += parse_kalshi_event_markets(event, self.venue)
             cursor = body.get("cursor")
             pages += 1
             if not cursor:
