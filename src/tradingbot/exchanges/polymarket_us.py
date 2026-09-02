@@ -252,8 +252,12 @@ class PolymarketUSExchange(Exchange):
     async def cancel_order(self, order: Order) -> Order:
         if self._sign is None or self._client is None or not order.venue_id:
             return order
-        path = f"/v1/orders/{order.venue_id}"
-        resp = await self._client.delete(path, headers=self._headers("DELETE", path))
+        # Cancel is POST /v1/order/{id}/cancel (singular "order") with a
+        # marketSlug body — NOT DELETE /v1/orders/{id}.
+        path = f"/v1/order/{order.venue_id}/cancel"
+        resp = await self._client.post(
+            path, json={"marketSlug": order.market.market_id},
+            headers=self._headers("POST", path))
         if resp.status_code < 400 and not order.is_terminal:
             order.status = OrderStatus.CANCELED
         return order
