@@ -12,6 +12,7 @@ is deliberate so paper mode is the only thing that can run unconfigured.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from decimal import Decimal
 
@@ -59,7 +60,11 @@ def parse_kalshi_markets(markets: list, venue: Venue) -> list[Market]:
             tick_size=0.01,
             min_size=Decimal(1),
             metadata={
-                "volume": float(m.get("volume") or 0),
+                # 2026 wire format renamed volume -> volume_24h_fp / volume_fp
+                # (fixed-point strings); keep the legacy key as a fallback.
+                "volume": float(m.get("volume_24h_fp")
+                                or m.get("volume_fp")
+                                or m.get("volume") or 0),
                 "category": (m.get("category") or "").lower(),
                 "raw": m,
             },
@@ -73,6 +78,32 @@ def cents_to_prob(cents: int) -> float:
 
 def prob_to_cents(prob: float) -> int:
     return max(1, min(99, round(prob * 100)))
+
+
+def parse_kalshi_orderbook(ob: dict, market_key: str) -> OrderBook:
+    """Build a unified YES-probability OrderBook from Kalshi's `orderbook_fp`.
+
+    The 2026 wire format sends dollar-denominated prices (already in [0,1]) and
+    fixed-point, possibly fractional, sizes — both as strings:
+
+        {"yes_dollars": [["0.62", "1200.00"], ...],   # resting YES bids
+         "no_dollars":  [["0.41", "800.00"], ...]}    # resting NO bids
+
+    A NO bid at price p is a YES ask at (1 - p), so both fold onto the YES book.
+    (Superseded the old integer-cents `{"yes": [[62, 1200]], "no": [...]}` shape.)
+    The 1 - p conversion is rounded to Kalshi's 4-decimal price grid to keep the
+    result off float dust (1 - 0.55 would otherwise be 0.44999999999999996).
+    """
+    yes = ob.get("yes_dollars") or []
+    no = ob.get("no_dollars") or []
+    bids = tuple(sorted(
+        (PriceLevel(price=float(p), size=Decimal(str(s))) for p, s in yes),
+        key=lambda lvl: lvl.price, reverse=True))
+    asks = tuple(sorted(
+        (PriceLevel(price=round(1.0 - float(p), 4), size=Decimal(str(s)))
+         for p, s in no),
+        key=lambda lvl: lvl.price))
+    return OrderBook(market_key=market_key, bids=bids, asks=asks)
 
 
 class KalshiExchange(Exchange):
@@ -99,12 +130,57 @@ class KalshiExchange(Exchange):
 
     async def list_markets(self, *, event_filter: str | None = None) -> list[Market]:
         assert self._client is not None, "connect() first"
-        params: dict = {"status": "open", "limit": 200}
-        if event_filter:
-            params["series_ticker"] = event_filter
-        resp = await self._client.get("/trade-api/v2/markets", params=params)
+        # Kalshi's status=open listing is ~all auto-generated KXMVECROSSCATEGORY
+        # parlay markets (empty books, no volume), so real markets are pulled by
+        # series. An explicit event_filter selects one series; otherwise the
+        # configured set (self._creds.series) is swept. With neither, fall back to
+        # the raw open listing with the MVE junk filtered out.
+        series = [event_filter] if event_filter else list(self._creds.series)
+        if not series:
+            return await self._list_open(exclude_mve=True)
+        cap = self._creds.discovery_max
+        out: dict[str, Market] = {}
+        for s in series:
+            if len(out) >= cap:
+                break
+            for m in await self._list_series(s, cap - len(out)):
+                out[m.market_id] = m
+            await asyncio.sleep(0.1)  # gentle spacing to stay under the rate limit
+        return list(out.values())
+
+    async def _list_series(self, series_ticker: str, cap: int) -> list[Market]:
+        """Fetch open markets for one series, paginating by cursor up to `cap`.
+        Bounded pages/attempts so a persistent 429 can't wedge discovery."""
+        markets: list[Market] = []
+        cursor: str | None = None
+        pages = attempts = 0
+        while len(markets) < cap and pages < 5 and attempts < 10:
+            attempts += 1
+            params: dict = {"series_ticker": series_ticker, "status": "open", "limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+            resp = await self._client.get("/trade-api/v2/markets", params=params)
+            if resp.status_code == 429:
+                await asyncio.sleep(1.0)
+                continue
+            resp.raise_for_status()
+            body = resp.json()
+            markets += parse_kalshi_markets(body.get("markets", []), self.venue)
+            cursor = body.get("cursor")
+            pages += 1
+            if not cursor:
+                break
+        return markets[:cap]
+
+    async def _list_open(self, exclude_mve: bool = True) -> list[Market]:
+        """Fallback discovery: the raw open listing, minus MVE parlay junk."""
+        resp = await self._client.get(
+            "/trade-api/v2/markets", params={"status": "open", "limit": 200})
         resp.raise_for_status()
-        return parse_kalshi_markets(resp.json().get("markets", []), self.venue)
+        raw = resp.json().get("markets", [])
+        if exclude_mve:
+            raw = [m for m in raw if not m.get("ticker", "").startswith("KXMVE")]
+        return parse_kalshi_markets(raw, self.venue)
 
     async def fetch_order_book(self, market: Market, depth: int = 10) -> OrderBook:
         assert self._client is not None, "connect() first"
@@ -113,20 +189,8 @@ class KalshiExchange(Exchange):
             params={"depth": depth},
         )
         resp.raise_for_status()
-        ob = resp.json().get("orderbook", {})
-        # Kalshi returns YES bids and NO bids; a NO bid at price p is a YES ask
-        # at (100 - p). Normalize both onto the YES probability book.
-        yes = ob.get("yes") or []
-        no = ob.get("no") or []
-        bids = tuple(
-            PriceLevel(price=cents_to_prob(c), size=Decimal(str(s)))
-            for c, s in sorted(yes, reverse=True)
-        )
-        asks = tuple(
-            PriceLevel(price=cents_to_prob(100 - c), size=Decimal(str(s)))
-            for c, s in sorted(no)
-        )
-        return OrderBook(market_key=market.key, bids=bids, asks=asks)
+        ob = resp.json().get("orderbook_fp", {})
+        return parse_kalshi_orderbook(ob, market.key)
 
     async def place_order(self, order: Order) -> Order:
         assert self._client is not None, "connect() first"

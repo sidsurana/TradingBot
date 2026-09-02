@@ -75,17 +75,22 @@ class LocalBook:
         return OrderBook(market_key=self.market_key, bids=bids, asks=asks, ts=self.ts)
 
 
-def _cents(c) -> float:
-    return int(c) / 100.0
-
-
 def parse_kalshi_message(msg: dict, key_by_ticker: dict[str, str],
                          books: dict[str, LocalBook], dirty: set | None = None) -> None:
     """Apply a Kalshi orderbook_snapshot / orderbook_delta message. Adds any
     market whose book changed to `dirty` (for the event-driven reactor).
 
-    Kalshi sends YES bids and NO bids in cents. A NO level at price p is a YES ask
-    at (100 - p) cents, so both fold onto the unified YES book.
+    2026 wire format (dollar-denominated, string-valued):
+      snapshot: {type:"orderbook_snapshot", msg:{market_ticker, yes_dollars_fp:
+          [["0.40","10.00"]], no_dollars_fp:[["0.55","7.00"]]}}
+      delta:    {type:"orderbook_delta", msg:{market_ticker, price_dollars:"0.40",
+          delta_fp:"5.00", side:"yes"|"no"}}
+    Prices are already probabilities in [0,1]; sizes may be fractional. A NO level
+    at price p is a YES ask at (1 - p), so both fold onto the unified YES book.
+    The 1 - p conversion is rounded to Kalshi's 4-decimal price grid to keep the
+    book keys off float dust. `price_dollars`/`delta_fp` can be absent on a
+    heartbeat/partial delta, so a missing price is ignored rather than crashing
+    (the old int-cents parser did `100 - None` and killed the socket task).
     """
     mtype = msg.get("type")
     data = msg.get("msg", msg)
@@ -96,16 +101,19 @@ def parse_kalshi_message(msg: dict, key_by_ticker: dict[str, str],
     book = books.setdefault(key, LocalBook(key))
 
     if mtype == "orderbook_snapshot":
-        bids = [(_cents(p), s) for p, s in data.get("yes", [])]
-        asks = [(_cents(100 - p), s) for p, s in data.get("no", [])]
+        bids = [(float(p), s) for p, s in (data.get("yes_dollars_fp") or [])]
+        asks = [(round(1.0 - float(p), 4), s) for p, s in (data.get("no_dollars_fp") or [])]
         book.set_snapshot(bids, asks)
     elif mtype == "orderbook_delta":
-        price_c = data.get("price")
-        delta = data.get("delta", 0)
+        price = data.get("price_dollars")
+        if price is None:
+            return
+        delta = data.get("delta_fp", 0)
+        p = float(price)
         if data.get("side") == "yes":
-            book.apply_delta(True, _cents(price_c), delta)
-        else:  # no side -> YES ask at (100 - price)
-            book.apply_delta(False, _cents(100 - price_c), delta)
+            book.apply_delta(True, p, delta)
+        else:  # no side -> YES ask at (1 - price)
+            book.apply_delta(False, round(1.0 - p, 4), delta)
     else:
         return
     if dirty is not None:

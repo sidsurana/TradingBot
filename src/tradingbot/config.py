@@ -46,12 +46,36 @@ class ExitSettings(BaseSettings):
     emit_cooldown_s: float = 30.0            # min seconds between exit re-emits per market
 
 
+# Kalshi's `status=open` listing is dominated by auto-generated
+# KXMVECROSSCATEGORY parlay markets (empty books, no volume) — real liquid
+# markets must be pulled per series. This is a curated set of series verified to
+# carry live two-sided books; override with TB_KALSHI_SERIES to scope what the
+# bot tracks. Ranking/top-N still happens in the universe selector.
+DEFAULT_KALSHI_SERIES = [
+    # crypto (24/7)
+    "KXBTCD", "KXBTC", "KXETHD", "KXETH",
+    # rates / macro
+    "KXFED", "KXCPIYOY", "KXCPI", "KXPAYROLLS", "KXGDP",
+    # equity index ranges
+    "KXNASDAQ100", "KXINX",
+    # daily high-temp weather
+    "KXHIGHNY", "KXHIGHLAX", "KXHIGHCHI", "KXHIGHMIA",
+    # sports
+    "KXNBA", "KXNBAGAME", "KXNFLGAME", "KXMLBGAME", "KXNCAAF",
+]
+
+
 class KalshiCreds(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TB_KALSHI_", env_file=".env", extra="ignore")
 
     api_key_id: str = ""
     private_key_path: str = ""       # Kalshi uses RSA-signed requests
     base_url: str = "https://api.elections.kalshi.com"
+    # Series to pull markets from during discovery (JSON list in env). Empty is
+    # allowed but degrades to the MVE-filtered open listing, which is thin — keep
+    # the curated default unless you deliberately want a narrower universe.
+    series: list[str] = Field(default_factory=lambda: list(DEFAULT_KALSHI_SERIES))
+    discovery_max: int = 500         # cap markets pulled per discovery cycle
 
     @property
     def configured(self) -> bool:

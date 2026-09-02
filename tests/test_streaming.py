@@ -44,13 +44,52 @@ def test_localbook_absolute_set_level():
 def test_parse_kalshi_snapshot_folds_no_into_asks():
     books = {}
     key_by_ticker = {"K1": "kalshi:K1"}
-    # YES bids at 40c; NO bids at 55c -> YES ask at (100-55)=45c.
+    # 2026 wire format: dollar-string prices, fixed-point string sizes.
+    # YES bids at $0.40; NO bids at $0.55 -> YES ask at (1-0.55)=$0.45.
     msg = {"type": "orderbook_snapshot",
-           "msg": {"market_ticker": "K1", "yes": [[40, 10]], "no": [[55, 7]]}}
+           "msg": {"market_ticker": "K1",
+                   "yes_dollars_fp": [["0.40", "10.00"]],
+                   "no_dollars_fp": [["0.55", "7.00"]]}}
     parse_kalshi_message(msg, key_by_ticker, books)
     ob = books["kalshi:K1"].to_order_book()
     assert ob.best_bid.price == 0.40
-    assert ob.best_ask.price == 0.45 and ob.best_ask.size == Decimal(7)
+    assert ob.best_ask.price == 0.45 and ob.best_ask.size == Decimal("7.00")
+
+
+def test_parse_kalshi_delta_applies_dollar_price_and_fp_size():
+    books = {}
+    key_by_ticker = {"K1": "kalshi:K1"}
+    parse_kalshi_message(
+        {"type": "orderbook_snapshot",
+         "msg": {"market_ticker": "K1", "yes_dollars_fp": [["0.40", "10.00"]],
+                 "no_dollars_fp": []}},
+        key_by_ticker, books)
+    # YES side add: 10 -> 15 at $0.40 (fractional fixed-point size allowed).
+    parse_kalshi_message(
+        {"type": "orderbook_delta",
+         "msg": {"market_ticker": "K1", "price_dollars": "0.40",
+                 "delta_fp": "5.00", "side": "yes"}},
+        key_by_ticker, books)
+    assert books["kalshi:K1"].bids[0.40] == Decimal("15.00")
+    # NO delta at $0.55 -> YES ask at $0.45.
+    parse_kalshi_message(
+        {"type": "orderbook_delta",
+         "msg": {"market_ticker": "K1", "price_dollars": "0.55",
+                 "delta_fp": "3.00", "side": "no"}},
+        key_by_ticker, books)
+    assert books["kalshi:K1"].asks[0.45] == Decimal("3.00")
+
+
+def test_parse_kalshi_delta_missing_price_does_not_crash():
+    # A partial/heartbeat delta with no price_dollars must be ignored, not raise
+    # (the old int-cents parser did `100 - None` and killed the socket task).
+    books = {}
+    key_by_ticker = {"K1": "kalshi:K1"}
+    parse_kalshi_message(
+        {"type": "orderbook_delta",
+         "msg": {"market_ticker": "K1", "side": "no", "delta_fp": "5.00"}},
+        key_by_ticker, books)
+    assert books["kalshi:K1"].to_order_book().best_ask is None
 
 
 def test_parse_polymarket_book_and_price_change():
