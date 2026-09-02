@@ -290,6 +290,9 @@ class KalshiExchange(Exchange):
             "price": f"{order.price:.4f}",
             "time_in_force": tif,
             "self_trade_prevention_type": "taker_at_cross",
+            # Kalshi shards matching across exchanges; -1 auto-routes to the shard
+            # holding this ticker (a fixed 0 hit the wrong shard -> user_not_found).
+            "exchange_index": -1,
         }
         resp = await self._client.post(
             ORDERS_V2_PATH, json=payload, headers=self._sign("POST", ORDERS_V2_PATH)
