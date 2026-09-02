@@ -134,6 +134,8 @@ class Order:
     avg_fill_price: float | None = None
     created_at: float = field(default_factory=time.time)
     reason: str = ""                  # strategy annotation / reject reason
+    time_in_force: str = ""           # "" = default (GTC); "FOK" = fill-or-kill leg
+    set_id: str = ""                  # groups legs of one atomic set (dutch book)
 
     @property
     def remaining(self) -> Decimal:

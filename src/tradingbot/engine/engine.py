@@ -29,7 +29,16 @@ from tradingbot.engine.signals import SignalStore
 from tradingbot.engine.universe import UniverseSelector
 from tradingbot.exchanges.base import Exchange
 from tradingbot.exchanges.paper import PaperExchange
-from tradingbot.models import Fill, Market, OrderBook, OrderStatus, Venue
+from tradingbot.models import (
+    Fill,
+    Market,
+    Order,
+    OrderBook,
+    OrderStatus,
+    OrderType,
+    Side,
+    Venue,
+)
 from tradingbot.strategies.base import Context, Strategy
 
 log = structlog.get_logger(__name__)
@@ -447,18 +456,79 @@ class Engine:
         self._quotes.clear()
 
     async def _place_orders(self, orders: list, books: dict[str, OrderBook]) -> None:
+        # Atomic sets (dutch-book legs sharing a set_id) must fill completely or be
+        # unwound; place them separately from ordinary independent orders.
+        sets: dict[str, list] = {}
+        singles: list = []
         for order in orders:
-            self._market_registry.setdefault(order.market.key, order.market)
-            if not self.risk.approve(order, books):
-                continue
+            if order.set_id:
+                sets.setdefault(order.set_id, []).append(order)
+            else:
+                singles.append(order)
+        for legs in sets.values():
+            await self._place_locked_set(legs, books)
+        for order in singles:
+            await self._place_single(order, books)
+
+    async def _place_single(self, order, books: dict[str, OrderBook]) -> None:
+        self._market_registry.setdefault(order.market.key, order.market)
+        if not self.risk.approve(order, books):
+            return
+        try:
+            await self.exec.place_order(order)
+            if order.status is OrderStatus.REJECTED:
+                log.warning("order.rejected", market=order.market.key, reason=order.reason)
+        except NotImplementedError as exc:
+            log.error("order.unsupported", market=order.market.key, error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            log.error("order.error", market=order.market.key, error=str(exc))
+
+    async def _place_locked_set(self, legs: list, books: dict[str, OrderBook]) -> None:
+        """Place a complete dutch-book set all-or-nothing. Legs are FOK, so each
+        either fully fills or dies. If any leg fails to fully fill, the legs that
+        DID fill are immediately flattened (sold to bid) — a partially-filled set
+        is directional exposure, not a locked arb. Risk-approve every leg up front
+        so we never start a set we're not cleared to complete."""
+        for leg in legs:
+            self._market_registry.setdefault(leg.market.key, leg.market)
+            if not self.risk.approve(leg, books):
+                log.warning("dutch_book.set_skipped_by_risk", set_id=legs[0].set_id,
+                            market=leg.market.key)
+                return
+        filled: list = []
+        for leg in legs:
             try:
-                await self.exec.place_order(order)
-                if order.status is OrderStatus.REJECTED:
-                    log.warning("order.rejected", market=order.market.key, reason=order.reason)
-            except NotImplementedError as exc:
-                log.error("order.unsupported", market=order.market.key, error=str(exc))
+                await self.exec.place_order(leg)
             except Exception as exc:  # noqa: BLE001
-                log.error("order.error", market=order.market.key, error=str(exc))
+                log.error("dutch_book.leg_error", market=leg.market.key, error=str(exc))
+            if leg.status is OrderStatus.FILLED and leg.filled_size >= leg.size:
+                filled.append(leg)
+            else:
+                # Incomplete set: stop legging in and unwind whatever filled.
+                log.warning("dutch_book.incomplete_unwinding", set_id=legs[0].set_id,
+                            wanted=len(legs), filled=len(filled),
+                            failed_market=leg.market.key, failed_status=leg.status.value)
+                await self._unwind_legs(filled, books)
+                return
+        log.info("dutch_book.locked", set_id=legs[0].set_id, legs=len(filled))
+
+    async def _unwind_legs(self, legs: list, books: dict[str, OrderBook]) -> None:
+        """Flatten filled dutch-book legs by selling each back to its best bid
+        (marketable). Accepts the spread/fee cost to shed directional risk."""
+        for leg in legs:
+            book = books.get(leg.market.key)
+            bid = book.best_bid.price if (book and book.best_bid) else leg.price
+            unwind = Order(
+                market=leg.market, side=Side.SELL, size=leg.filled_size or leg.size,
+                type=OrderType.LIMIT, price=bid, time_in_force="FOK",
+                reason=f"unwind incomplete {leg.set_id}",
+            )
+            try:
+                await self.exec.place_order(unwind)
+                log.info("dutch_book.unwound", market=leg.market.key,
+                         status=unwind.status.value)
+            except Exception as exc:  # noqa: BLE001
+                log.error("dutch_book.unwind_error", market=leg.market.key, error=str(exc))
 
     async def _refresh_books(self) -> dict[str, OrderBook]:
         # Streaming path: read live books from the WS cache (instant). REST-fill

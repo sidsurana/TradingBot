@@ -209,6 +209,9 @@ class PolymarketUSExchange(Exchange):
         path = "/v1/orders"
         tick = order.market.tick_size or 0.01
         price = round(round(order.price / tick) * tick, 6)
+        # FOK legs (dutch-book) execute synchronously and fill-or-kill so the
+        # caller learns the definitive outcome inline and can unwind on failure.
+        fok = order.time_in_force == "FOK"
         payload = {
             "marketSlug": order.market.market_id,
             "type": "ORDER_TYPE_LIMIT",
@@ -216,8 +219,10 @@ class PolymarketUSExchange(Exchange):
             "action": "ORDER_ACTION_BUY" if order.side is Side.BUY else "ORDER_ACTION_SELL",
             "price": {"value": f"{price:.6f}", "currency": "USD"},
             "quantity": float(order.size),
-            "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "tif": "TIME_IN_FORCE_FILL_OR_KILL" if fok else "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         }
+        if fok:
+            payload["synchronousExecution"] = True
         resp = await self._client.post(path, json=payload, headers=self._headers("POST", path))
         if resp.status_code >= 400:
             order.status = OrderStatus.REJECTED
@@ -226,12 +231,22 @@ class PolymarketUSExchange(Exchange):
             return order
         data = resp.json()
         order.venue_id = data.get("id")
-        # Prefer the state from any synchronous execution; else accepted/open.
         execs = data.get("executions") or []
+        filled = sum(_amount(e.get("quantity") or e.get("fillQty") or 0) for e in execs)
+        if filled > 0:
+            order.filled_size = Decimal(str(filled))
+            order.avg_fill_price = price
         state = execs[-1].get("orderState") if execs else None
-        order.status = _STATUS.get(state, OrderStatus.OPEN)
+        if state:
+            order.status = _STATUS.get(state, OrderStatus.OPEN)
+        elif fok:
+            # Synchronous FOK with no execution reported -> it was killed unfilled.
+            order.status = OrderStatus.FILLED if order.filled_size >= order.size else OrderStatus.CANCELED
+        else:
+            order.status = OrderStatus.OPEN
         log.info("polymarket_us.order_placed", slug=order.market.market_id,
-                 venue_id=order.venue_id, status=order.status.value)
+                 venue_id=order.venue_id, status=order.status.value,
+                 filled=str(order.filled_size))
         return order
 
     async def cancel_order(self, order: Order) -> Order:

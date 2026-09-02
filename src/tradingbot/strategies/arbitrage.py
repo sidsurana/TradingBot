@@ -115,11 +115,15 @@ class ArbitrageStrategy(Strategy):
             size = min(size, self.max_size)
             if size <= 0:
                 continue
+            # Tag every leg with the same set_id and FOK: the engine places them
+            # as one atomic set, and unwinds any legs that fill if the set can't
+            # be completed (a partially-filled set is directional risk, not arb).
             for m, price, _ in best.values():
                 out.append(
                     Order(
                         market=m, side=Side.BUY, size=size, type=OrderType.LIMIT,
                         price=price, reason=f"dutch_book {event_id} edge={edge:.3f}",
+                        time_in_force="FOK", set_id=f"db:{event_id}",
                     )
                 )
             log.info("arb.dutch_book", event_id=event_id, cost=round(cost, 4),
