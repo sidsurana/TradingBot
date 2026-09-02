@@ -95,6 +95,22 @@ class PolymarketCreds(BaseSettings):
         return bool(self.private_key)
 
 
+class PolymarketUSCreds(BaseSettings):
+    """Polymarket US (api.polymarket.us) — Ed25519 API-key auth, a separate
+    platform from polymarket.com. When configured, it is the live Polymarket
+    venue (the .com wallet adapter is not used)."""
+    model_config = SettingsConfigDict(env_prefix="TB_POLYUS_", env_file=".env", extra="ignore")
+
+    key_id: str = ""                 # dev-portal Key ID (UUID)
+    secret_key: str = ""             # dev-portal Secret Key (base64; first 32B = ed25519 seed)
+    base_url: str = "https://api.polymarket.us"
+    discovery_max: int = 400         # markets pulled per discovery cycle
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.key_id and self.secret_key)
+
+
 class AnthropicCreds(BaseSettings):
     """Credentials + model config for the Claude agent ("the brain")."""
 
@@ -439,6 +455,7 @@ class Settings(BaseSettings):
     signal: SignalSettings = Field(default_factory=SignalSettings)
     kalshi: KalshiCreds = Field(default_factory=KalshiCreds)
     polymarket: PolymarketCreds = Field(default_factory=PolymarketCreds)
+    polymarket_us: PolymarketUSCreds = Field(default_factory=PolymarketUSCreds)
     anthropic: AnthropicCreds = Field(default_factory=AnthropicCreds)
     telegram: TelegramCreds = Field(default_factory=TelegramCreds)
     goals: GoalSettings = Field(default_factory=GoalSettings)

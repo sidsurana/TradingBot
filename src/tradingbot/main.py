@@ -57,7 +57,14 @@ def build_engine(settings: Settings) -> Engine:
         # Polymarket-only certainty-carry profile leaves this off.
         if settings.kalshi.configured:
             venues[Venue.KALSHI] = KalshiExchange(settings.kalshi)
-        venues[Venue.POLYMARKET] = PolymarketExchange(settings.polymarket)
+        # Polymarket US (api.polymarket.us, Ed25519 key auth) is a separate
+        # platform from .com; when its creds are set it IS the Polymarket venue.
+        if settings.polymarket_us.configured:
+            from tradingbot.exchanges.polymarket_us import PolymarketUSExchange
+
+            venues[Venue.POLYMARKET] = PolymarketUSExchange(settings.polymarket_us)
+        else:
+            venues[Venue.POLYMARKET] = PolymarketExchange(settings.polymarket)
     router = ExchangeRouter(venues)
     strategies = [_build_strategy(name, settings) for name in settings.enabled_strategies]
     # Streaming is a prediction-market feature; in data-only mode there is
@@ -104,7 +111,9 @@ def _build_stream(settings: Settings):
         return None
     from tradingbot.exchanges.streaming import KalshiStream, PolymarketStream, StreamManager
 
-    clients = [PolymarketStream(settings.polymarket)]
+    # Polymarket US has its own WebSocket protocol (not yet wired); when it's the
+    # active venue, skip the .com market stream and let REST fill its books.
+    clients = [] if settings.polymarket_us.configured else [PolymarketStream(settings.polymarket)]
     if settings.kalshi.configured:
         from tradingbot.exchanges.kalshi_auth import load_signer
 
