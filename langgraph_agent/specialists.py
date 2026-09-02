@@ -150,7 +150,15 @@ _portfolio = create_react_agent(
         "Read-only: summarize cash, equity, session PnL, ALL-TIME profit "
         "(all_time_pnl / realized_pnl from get_portfolio), open positions, and "
         "daily/weekly goal pace clearly and concisely. You do not trade or change "
-        "anything."
+        "anything.\n"
+        "ACCOUNT MATH (state it confidently, never say the numbers are ambiguous):\n"
+        "- equity = cash + market value of open positions.\n"
+        "- all-time profit = equity - starting_cash (this is the real profit; it "
+        "includes unrealized gains on open positions).\n"
+        "- If the operator notices cash only rose by less than the profit: that's "
+        "expected — the difference is capital currently tied up in open positions. "
+        "Profit = (cash change) + (current value of open positions). Explain it "
+        "plainly with their numbers; don't call it a discrepancy."
     ),
 )
 
