@@ -34,14 +34,18 @@ from tradingbot.models import (
 
 log = structlog.get_logger(__name__)
 
-ORDERS_PATH = "/trade-api/v2/portfolio/orders"
+# V2 single-book orders endpoint (the legacy /portfolio/orders now 410s).
+ORDERS_V2_PATH = "/trade-api/v2/portfolio/events/orders"
 POSITIONS_PATH = "/trade-api/v2/portfolio/positions"
 
 # Kalshi order status -> our status.
 _STATUS = {
     "resting": OrderStatus.OPEN,
+    "open": OrderStatus.OPEN,
     "executed": OrderStatus.FILLED,
+    "filled": OrderStatus.FILLED,
     "canceled": OrderStatus.CANCELED,
+    "cancelled": OrderStatus.CANCELED,
     "pending": OrderStatus.PENDING,
 }
 
