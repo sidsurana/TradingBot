@@ -59,6 +59,22 @@ class TradeNotifier:
         )
         await self._send(venue, text)
 
+    async def summary(self, venue: Venue, equity: float, pnl: float,
+                      buys: int, sells: int) -> None:
+        """Once-a-day check-in with the venue's P&L and today's trade counts."""
+        if not self.configured_for(venue):
+            return
+        sign = "+" if pnl >= 0 else "−"
+        traded = buys + sells
+        activity = f"{traded} trade{'s' if traded != 1 else ''} today ({buys} buy, {sells} sell)" \
+            if traded else "no trades today"
+        text = (
+            f"{self._header(venue)} — DAILY SUMMARY\n"
+            f"Equity ${equity:.2f}  |  P&L {sign}${abs(pnl):.2f}\n"
+            f"{activity}"
+        )
+        await self._send(venue, text)
+
     async def announce(self, venue: Venue, text: str) -> None:
         """A plain labeled message (startup ping, test, etc.)."""
         if not self.configured_for(venue):
