@@ -371,3 +371,16 @@ class KalshiExchange(Exchange):
             avg = (exposure / abs(count)) / 100.0 if count else 0.0
             out.append(Position(market=market, size=Decimal(count), avg_price=avg))
         return out
+
+    async def fetch_balance(self) -> float:
+        """Total cash balance in USD across shards (0.0 if unavailable). Never raises."""
+        if self._sign is None or self._client is None:
+            return 0.0
+        path = "/trade-api/v2/portfolio/balance"
+        try:
+            resp = await self._client.get(path, headers=self._sign("GET", path))
+            resp.raise_for_status()
+            return float(resp.json().get("balance_dollars") or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("kalshi.balance_error", error=str(exc))
+            return 0.0
