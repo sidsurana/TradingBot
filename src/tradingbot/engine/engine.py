@@ -242,7 +242,7 @@ class Engine:
 
     def _agent_prompt(self, venue, snap: dict, trades: dict) -> str:
         """System prompt: scope the bot to ONE venue and ground it in live data."""
-        label = "Kalshi" if venue is Venue.KALSHI else "Polymarket US"
+        label = "Kalshi" if venue is Venue.KALSHI else "Polymarket"
         pos = "\n".join(snap["positions"]) if snap["positions"] else "none"
         pct = snap["pnl"] / max(snap["baseline"], 1e-9) * 100
         return (
