@@ -471,6 +471,7 @@ class Settings(BaseSettings):
     polymarket_us: PolymarketUSCreds = Field(default_factory=PolymarketUSCreds)
     anthropic: AnthropicCreds = Field(default_factory=AnthropicCreds)
     telegram: TelegramCreds = Field(default_factory=TelegramCreds)
+    notifier: NotifierSettings = Field(default_factory=NotifierSettings)
     goals: GoalSettings = Field(default_factory=GoalSettings)
     autopilot: AutopilotSettings = Field(default_factory=AutopilotSettings)
     persistence: PersistenceSettings = Field(default_factory=PersistenceSettings)
