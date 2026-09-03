@@ -562,10 +562,11 @@ class Engine:
 
     async def _notify_trade(self, legs: list, action: str) -> None:
         """Text the venue's bot after a trade (BUY = locked set, SELL = unwind)."""
-        if not legs or self.notifier is None:
+        if not legs:
             return
         venue = legs[0].market.venue
-        if not self.notifier.configured_for(venue):
+        self._daily_trades[venue]["buys" if action == "BUY" else "sells"] += 1
+        if self.notifier is None or not self.notifier.configured_for(venue):
             return
         title = legs[0].market.title or legs[0].market.event_id
         cost = float(sum((leg.filled_size or leg.size) * Decimal(str(leg.price or 0))
