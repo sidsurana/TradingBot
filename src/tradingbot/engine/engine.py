@@ -167,6 +167,7 @@ class Engine:
     async def run(self) -> None:
         if not self.markets:
             await self.discover()
+        await self._announce_online()
         reactor_task = None
         if self.stream is not None:
             await self.stream.start(self.markets)
