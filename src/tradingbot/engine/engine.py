@@ -81,6 +81,8 @@ class Engine:
                 strat.set_store(self.signals)
         self._locked_day = ""        # day on which lock-gains already fired
         self._paused_by_goals = False
+        # Per-venue trade tally for the daily summary (reset each summary).
+        self._daily_trades: dict = defaultdict(lambda: {"buys": 0, "sells": 0})
 
         # In paper mode the execution layer simulates fills; in live mode the
         # router places real orders on the venues.
