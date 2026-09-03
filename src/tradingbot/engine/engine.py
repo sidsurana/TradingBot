@@ -45,6 +45,12 @@ from tradingbot.strategies.base import Context, Strategy
 log = structlog.get_logger(__name__)
 
 
+def _parse_edge(reason: str) -> float | None:
+    """Pull the fractional edge out of a dutch_book reason ('… edge=0.031')."""
+    m = re.search(r"edge[=\s]([0-9.]+)", reason or "")
+    return float(m.group(1)) if m else None
+
+
 class Engine:
     def __init__(
         self,
