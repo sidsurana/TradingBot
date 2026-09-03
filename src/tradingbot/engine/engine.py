@@ -164,6 +164,18 @@ class Engine:
     def stop(self) -> None:
         self._stop.set()
 
+    async def _announce_online(self) -> None:
+        """Ping each configured venue bot on startup with its current equity."""
+        if self.notifier is None or not self.notifier.any_configured:
+            return
+        for venue in (Venue.KALSHI, Venue.POLYMARKET):
+            if not self.notifier.configured_for(venue):
+                continue
+            eq, pnl = await self._venue_equity_pnl(venue)
+            sign = "+" if pnl >= 0 else "−"
+            await self.notifier.announce(
+                venue, f"online — watching for arbs.\nEquity ${eq:.2f}  |  P&L {sign}${abs(pnl):.2f}")
+
     async def run(self) -> None:
         if not self.markets:
             await self.discover()
