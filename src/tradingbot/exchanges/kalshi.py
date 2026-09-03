@@ -302,30 +302,53 @@ class KalshiExchange(Exchange):
             order.reason = f"kalshi {resp.status_code}: {resp.text[:200]}"
             log.warning("kalshi.order_rejected", reason=order.reason)
             return order
-        data = resp.json().get("order", {})
+        # V2 create response is FLAT (not nested under "order") and carries no
+        # status string — infer it from fill/remaining counts:
+        #   {order_id, fill_count, remaining_count, average_fill_price, ...}
+        data = resp.json()
         order.venue_id = data.get("order_id") or data.get("id")
-        try:
-            filled = Decimal(str(data.get("filled_count") or data.get("fill_count") or 0))
-        except (ValueError, TypeError):
-            filled = Decimal(0)
-        order.status = _STATUS.get(
-            data.get("status", ""), OrderStatus.OPEN if order.venue_id else OrderStatus.PENDING)
-        if order.status is OrderStatus.FILLED:
-            order.filled_size = order.size
-            order.avg_fill_price = order.price
-        elif filled > 0:
-            order.filled_size = filled
-            order.avg_fill_price = order.price
+
+        def _dec(x) -> Decimal:
+            try:
+                return Decimal(str(x))
+            except (ValueError, TypeError):
+                return Decimal(0)
+
+        fill = _dec(data.get("fill_count") or data.get("filled_count") or 0)
+        remaining = _dec(data.get("remaining_count")) if data.get("remaining_count") is not None \
+            else (order.size - fill)
+        if fill > 0:
+            order.filled_size = fill
+            avg = data.get("average_fill_price")
+            order.avg_fill_price = float(avg) if avg not in (None, "") else order.price
+        if remaining <= 0 and fill > 0:
+            order.status = OrderStatus.FILLED
+        elif fill > 0:
+            order.status = OrderStatus.PARTIAL
+        elif order.time_in_force in ("FOK", "IOC"):
+            order.status = OrderStatus.CANCELED   # marketable-only, nothing filled
+        elif order.venue_id:
+            order.status = OrderStatus.OPEN       # accepted, resting
+        else:
+            order.status = OrderStatus.PENDING
         log.info("kalshi.order_placed", ticker=order.market.market_id, venue_id=order.venue_id,
                  status=order.status.value, filled=str(order.filled_size))
         return order
+
+    def _shard(self, order: Order):
+        """The exchange shard a market's orders live on (from market metadata),
+        so cancels target the right instance; -1 lets Kalshi auto-route."""
+        idx = (order.market.metadata.get("raw") or {}).get("exchange_index")
+        return idx if idx is not None else -1
 
     async def cancel_order(self, order: Order) -> Order:
         assert self._client is not None and self._sign is not None
         if not order.venue_id:
             return order
         path = f"{ORDERS_V2_PATH}/{order.venue_id}"
-        resp = await self._client.delete(path, headers=self._sign("DELETE", path))
+        resp = await self._client.request(
+            "DELETE", path, params={"exchange_index": self._shard(order)},
+            headers=self._sign("DELETE", path))
         if resp.status_code < 400 and not order.is_terminal:
             order.status = OrderStatus.CANCELED
         return order
