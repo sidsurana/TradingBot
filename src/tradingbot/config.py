@@ -158,6 +158,10 @@ class NotifierSettings(BaseSettings):
     kalshi_baseline: float = 0.0   # 0 => use baseline_usd
     pm_baseline: float = 0.0
     summary_hour: int = 9          # local hour (0-23) for the daily per-venue summary; -1 disables
+    # Natural-language replies: when a key is set, incoming messages are answered
+    # conversationally (grounded in the venue's live data). Empty => fixed reports.
+    openai_key: str = ""
+    openai_model: str = "gpt-4o-mini"
 
     def baseline_for(self, venue) -> float:
         from tradingbot.models import Venue
