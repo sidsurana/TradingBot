@@ -51,11 +51,13 @@ class Engine:
         router: ExchangeRouter,
         strategies: list[Strategy],
         stream=None,
+        notifier=None,
     ):
         self.settings = settings
         self.router = router
         self.strategies = strategies
         self.stream = stream   # optional StreamManager for WebSocket books
+        self.notifier = notifier  # optional per-venue TradeNotifier (Telegram)
         self.portfolio = Portfolio(settings.paper_starting_cash)
         self.risk = RiskManager(settings.risk, self.portfolio)
         self.goals = GoalTracker(settings.goals)
