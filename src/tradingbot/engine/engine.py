@@ -679,6 +679,13 @@ class Engine:
                 b = self.stream.book(p.market.key)
                 if b is not None and b.mid is not None:
                     mark = b.mid
+            if mark is None and adapter is not None:  # untracked market -> fetch its book
+                try:
+                    b = await adapter.fetch_order_book(p.market)
+                    if b.mid is not None:
+                        mark = b.mid
+                except Exception:  # noqa: BLE001
+                    pass
             if mark is not None:
                 upnl = (mark - avg) * size
                 pos_value += mark * size
