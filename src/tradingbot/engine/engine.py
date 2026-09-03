@@ -205,11 +205,48 @@ class Engine:
                 await self.notifier.daily_report(venue, snap, t["buys"], t["sells"], date_str)
             self._daily_trades.clear()
 
+    async def _bot_responder(self, venue) -> None:
+        """Reply to messages sent to this venue's bot with its live report, so the
+        two trade bots are interactive (they were send-only). Only the owner chat
+        is answered; other senders are ignored."""
+        if self.notifier is None or not self.notifier.configured_for(venue):
+            return
+        owner = self.notifier.owner_chat(venue)
+        offset = 0
+        try:                       # skip any backlog so we don't reply to old msgs
+            offset, _ = await self.notifier.poll(venue, offset)
+        except Exception:          # noqa: BLE001
+            pass
+        while not self._stop.is_set():
+            try:
+                offset, msgs = await self.notifier.poll(venue, offset)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("responder.poll_error", venue=venue.value, error=str(exc))
+                await asyncio.sleep(3)
+                continue
+            for chat_id, text in msgs:
+                if chat_id != owner:
+                    continue
+                low = text.lower().lstrip("/")
+                if low in ("help", "start", "commands"):
+                    await self.notifier.announce(
+                        venue, "Send /pnl, /status, or /positions for this venue's "
+                        "live equity, P&L, and open positions.")
+                else:
+                    snap = await self._venue_snapshot(venue)
+                    t = self._daily_trades[venue]
+                    await self.notifier.report(venue, snap, t["buys"], t["sells"], "STATUS")
+
     async def run(self) -> None:
         if not self.markets:
             await self.discover()
         await self._announce_online()
         summary_task = asyncio.create_task(self._daily_summary())
+        responder_tasks = [
+            asyncio.create_task(self._bot_responder(v))
+            for v in (Venue.KALSHI, Venue.POLYMARKET)
+            if self.notifier is not None and self.notifier.configured_for(v)
+        ]
         reactor_task = None
         if self.stream is not None:
             await self.stream.start(self.markets)
