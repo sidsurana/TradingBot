@@ -227,15 +227,38 @@ class Engine:
             for chat_id, text in msgs:
                 if chat_id != owner:
                     continue
-                low = text.lower().lstrip("/")
-                if low in ("help", "start", "commands"):
-                    await self.notifier.announce(
-                        venue, "Send /pnl, /status, or /positions for this venue's "
-                        "live equity, P&L, and open positions.")
-                else:
-                    snap = await self._venue_snapshot(venue)
-                    t = self._daily_trades[venue]
+                snap = await self._venue_snapshot(venue)
+                t = self._daily_trades[venue]
+                reply = None
+                key = self.settings.notifier.openai_key
+                if key:                       # natural-language answer, grounded in live data
+                    from tradingbot.interface import llm
+                    reply = await llm.chat(key, self.settings.notifier.openai_model,
+                                           self._agent_prompt(venue, snap, t), text)
+                if reply:
+                    await self.notifier.announce(venue, reply)
+                else:                         # no LLM (or it failed) -> fixed report
                     await self.notifier.report(venue, snap, t["buys"], t["sells"], "STATUS")
+
+    def _agent_prompt(self, venue, snap: dict, trades: dict) -> str:
+        """System prompt: scope the bot to ONE venue and ground it in live data."""
+        label = "Kalshi" if venue is Venue.KALSHI else "Polymarket US"
+        pos = "\n".join(snap["positions"]) if snap["positions"] else "none"
+        pct = snap["pnl"] / max(snap["baseline"], 1e-9) * 100
+        return (
+            f"You are the {label} trading assistant on Telegram. You speak ONLY about the "
+            f"user's {label} account and its autonomous dutch-book arbitrage bot — it buys "
+            f"a complete set of an event's mutually-exclusive outcomes when they cost under "
+            f"$1 after fees (locking risk-free profit) and unwinds a set it can't complete. "
+            f"Never discuss any other venue. Be concise (1-4 short lines), plain, and honest. "
+            f"Use ONLY the numbers below — never invent prices, trades, or P&L. If nothing "
+            f"has traded or P&L is ~0, say so plainly.\n\n"
+            f"Live {label} account (now):\n"
+            f"Equity ${snap['equity']:.2f}, cash ${snap['cash']:.2f}\n"
+            f"P&L since go-live: ${snap['pnl']:+.2f} ({pct:+.2f}%)\n"
+            f"Today: {trades['buys']} buys, {trades['sells']} sells\n"
+            f"Open positions:\n{pos}"
+        )
 
     async def run(self) -> None:
         if not self.markets:
