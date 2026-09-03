@@ -274,7 +274,8 @@ class Engine:
                 except asyncio.TimeoutError:
                     pass
         finally:
-            for task in (reactor_task, curator_task, settlement_task, summary_task):
+            for task in (reactor_task, curator_task, settlement_task, summary_task,
+                         *responder_tasks):
                 if task is not None:
                     task.cancel()
                     try:
