@@ -20,7 +20,7 @@ API = "https://api.telegram.org/bot{token}/sendMessage"
 # venue -> (emoji, header label)
 _LABELS = {
     Venue.KALSHI: ("🟦", "KALSHI AGENT"),
-    Venue.POLYMARKET: ("🟪", "POLYMARKET US AGENT"),
+    Venue.POLYMARKET: ("🟪", "POLYMARKET AGENT"),
 }
 
 
@@ -48,7 +48,7 @@ class TradeNotifier:
         """Send a trade message to the venue's bot. `action` is BUY or SELL."""
         if not self.configured_for(venue):
             return
-        sign = "+" if pnl >= 0 else "−"
+        sign = "−" if pnl < -0.005 else "+"
         edge_s = f", edge {edge * 100:.1f}%" if edge is not None else ""
         text = (
             f"{self._header(venue)} — {action}\n"
@@ -64,7 +64,7 @@ class TradeNotifier:
         """Once-a-day check-in with the venue's P&L and today's trade counts."""
         if not self.configured_for(venue):
             return
-        sign = "+" if pnl >= 0 else "−"
+        sign = "−" if pnl < -0.005 else "+"
         traded = buys + sells
         activity = f"{traded} trade{'s' if traded != 1 else ''} today ({buys} buy, {sells} sell)" \
             if traded else "no trades today"
@@ -82,7 +82,7 @@ class TradeNotifier:
         if not self.configured_for(venue):
             return
         pnl = snap["pnl"]
-        sign = "+" if pnl >= 0 else "−"
+        sign = "−" if pnl < -0.005 else "+"
         traded = buys + sells
         activity = (f"{traded} trade{'s' if traded != 1 else ''} today "
                     f"({buys} buy, {sells} sell)") if traded else "No trades today"
