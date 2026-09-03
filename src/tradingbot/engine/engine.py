@@ -513,10 +513,12 @@ class Engine:
                 await self._unwind_legs(filled, books)
                 return
         log.info("dutch_book.locked", set_id=legs[0].set_id, legs=len(filled))
+        await self._notify_trade(filled, "BUY")
 
     async def _unwind_legs(self, legs: list, books: dict[str, OrderBook]) -> None:
         """Flatten filled dutch-book legs by selling each back to its best bid
         (marketable). Accepts the spread/fee cost to shed directional risk."""
+        sold: list = []
         for leg in legs:
             book = books.get(leg.market.key)
             bid = book.best_bid.price if (book and book.best_bid) else leg.price
@@ -529,8 +531,42 @@ class Engine:
                 await self.exec.place_order(unwind)
                 log.info("dutch_book.unwound", market=leg.market.key,
                          status=unwind.status.value)
+                sold.append(unwind)
             except Exception as exc:  # noqa: BLE001
                 log.error("dutch_book.unwind_error", market=leg.market.key, error=str(exc))
+        await self._notify_trade(sold, "SELL")
+
+    async def _notify_trade(self, legs: list, action: str) -> None:
+        """Text the venue's bot after a trade (BUY = locked set, SELL = unwind)."""
+        if not legs or self.notifier is None:
+            return
+        venue = legs[0].market.venue
+        if not self.notifier.configured_for(venue):
+            return
+        title = legs[0].market.title or legs[0].market.event_id
+        cost = float(sum((leg.filled_size or leg.size) * Decimal(str(leg.price or 0))
+                         for leg in legs))
+        edge = _parse_edge(legs[0].reason)
+        equity, pnl = await self._venue_equity_pnl(venue)
+        try:
+            await self.notifier.trade(venue, action, title, len(legs), cost, edge, equity, pnl)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("notify.error", venue=venue.value, error=str(exc))
+
+    async def _venue_equity_pnl(self, venue) -> tuple[float, float]:
+        """Live equity (cash balance + positions at entry) and P&L vs the per-venue
+        deposit baseline. Best-effort — never raises into the trade path."""
+        adapter = self.router._venues.get(venue)
+        bal_fn = getattr(adapter, "fetch_balance", None)
+        equity = 0.0
+        if adapter is not None and bal_fn is not None:
+            try:
+                bal = await bal_fn()
+                positions = await adapter.fetch_positions()
+                equity = float(bal) + sum(float(p.size) * float(p.avg_price) for p in positions)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("pnl.error", venue=venue.value, error=str(exc))
+        return equity, equity - self.settings.notifier.baseline_usd
 
     async def _refresh_books(self) -> dict[str, OrderBook]:
         # Streaming path: read live books from the WS cache (instant). REST-fill
