@@ -153,6 +153,7 @@ class NotifierSettings(BaseSettings):
     pm_token: str = ""             # Polymarket US bot
     pm_chat_id: int = 0
     baseline_usd: float = 250.0    # per-venue deposit, for P&L = equity - baseline
+    summary_hour: int = 9          # local hour (0-23) for the daily per-venue summary; -1 disables
 
 
 class GoalSettings(BaseSettings):
