@@ -14,6 +14,7 @@ continues. It runs until cancelled (Ctrl-C / SIGTERM).
 from __future__ import annotations
 
 import asyncio
+import re
 from decimal import Decimal
 
 import structlog
