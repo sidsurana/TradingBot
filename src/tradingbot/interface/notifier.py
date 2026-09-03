@@ -75,10 +75,10 @@ class TradeNotifier:
         )
         await self._send(venue, text)
 
-    async def daily_report(self, venue: Venue, snap: dict, buys: int, sells: int,
-                           date_str: str) -> None:
-        """Rich daily check-in: equity/cash/P&L, today's trades, and every open
-        position with its mark and unrealized P&L (📊 positions + P&L block)."""
+    async def report(self, venue: Venue, snap: dict, buys: int, sells: int,
+                     label: str) -> None:
+        """Rich report: equity/cash/P&L, today's trades, and every open position
+        with its mark and unrealized P&L. `label` heads it (e.g. 'STATUS')."""
         if not self.configured_for(venue):
             return
         pnl = snap["pnl"]
@@ -87,7 +87,7 @@ class TradeNotifier:
         activity = (f"{traded} trade{'s' if traded != 1 else ''} today "
                     f"({buys} buy, {sells} sell)") if traded else "No trades today"
         lines = [
-            f"{self._header(venue)} — DAILY REPORT ({date_str})",
+            f"{self._header(venue)} — {label}",
             f"📊 Equity ${snap['equity']:.2f}, cash ${snap['cash']:.2f}",
             f"P&L {sign}${abs(pnl):.2f} ({pnl / max(snap['baseline'], 1e-9) * 100:+.2f}%)",
             activity,
@@ -98,6 +98,30 @@ class TradeNotifier:
         else:
             lines.append("No open positions.")
         await self._send(venue, "\n".join(lines))
+
+    async def daily_report(self, venue: Venue, snap: dict, buys: int, sells: int,
+                           date_str: str) -> None:
+        await self.report(venue, snap, buys, sells, f"DAILY REPORT ({date_str})")
+
+    def owner_chat(self, venue: Venue) -> int:
+        return self._bots.get(venue, ("", 0))[1]
+
+    async def poll(self, venue: Venue, offset: int) -> tuple[int, list[tuple[int, str]]]:
+        """Long-poll this bot for incoming messages. Returns (next_offset,
+        [(chat_id, text), ...]). Only this bot's token is polled, so there's no
+        getUpdates conflict with the other venue's bot."""
+        token = self._bots[venue][0]
+        new_offset, msgs = offset, []
+        async with httpx.AsyncClient(timeout=40.0) as c:
+            r = await c.get(f"https://api.telegram.org/bot{token}/getUpdates",
+                            params={"offset": offset, "timeout": 30})
+            r.raise_for_status()
+            for u in r.json().get("result", []):
+                new_offset = max(new_offset, u["update_id"] + 1)
+                m = u.get("message") or u.get("edited_message")
+                if m and "text" in m:
+                    msgs.append((m["chat"]["id"], m["text"].strip()))
+        return new_offset, msgs
 
     async def announce(self, venue: Venue, text: str) -> None:
         """A plain labeled message (startup ping, test, etc.)."""
