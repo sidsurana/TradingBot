@@ -75,6 +75,30 @@ class TradeNotifier:
         )
         await self._send(venue, text)
 
+    async def daily_report(self, venue: Venue, snap: dict, buys: int, sells: int,
+                           date_str: str) -> None:
+        """Rich daily check-in: equity/cash/P&L, today's trades, and every open
+        position with its mark and unrealized P&L (📊 positions + P&L block)."""
+        if not self.configured_for(venue):
+            return
+        pnl = snap["pnl"]
+        sign = "+" if pnl >= 0 else "−"
+        traded = buys + sells
+        activity = (f"{traded} trade{'s' if traded != 1 else ''} today "
+                    f"({buys} buy, {sells} sell)") if traded else "No trades today"
+        lines = [
+            f"{self._header(venue)} — DAILY REPORT ({date_str})",
+            f"📊 Equity ${snap['equity']:.2f}, cash ${snap['cash']:.2f}",
+            f"P&L {sign}${abs(pnl):.2f} ({pnl / max(snap['baseline'], 1e-9) * 100:+.2f}%)",
+            activity,
+        ]
+        if snap["positions"]:
+            lines.append("Positions:")
+            lines += snap["positions"]
+        else:
+            lines.append("No open positions.")
+        await self._send(venue, "\n".join(lines))
+
     async def announce(self, venue: Venue, text: str) -> None:
         """A plain labeled message (startup ping, test, etc.)."""
         if not self.configured_for(venue):
