@@ -142,6 +142,19 @@ class TelegramCreds(BaseSettings):
         return bool(self.bot_token and self.allowed_chat_ids)
 
 
+class NotifierSettings(BaseSettings):
+    """Per-venue trade-notification bots (Telegram). Each venue texts its OWN bot
+    on every trade, headed with the agent label, with that venue's live P&L.
+    Two separate bots => two separate chats on the phone."""
+    model_config = SettingsConfigDict(env_prefix="TB_NOTIFY_", env_file=".env", extra="ignore")
+
+    kalshi_token: str = ""
+    kalshi_chat_id: int = 0
+    pm_token: str = ""             # Polymarket US bot
+    pm_chat_id: int = 0
+    baseline_usd: float = 250.0    # per-venue deposit, for P&L = equity - baseline
+
+
 class GoalSettings(BaseSettings):
     """Profit targets. The bot tracks PnL against these and the agent reports on
     them; when a daily target is hit it can lock gains by throttling risk."""
