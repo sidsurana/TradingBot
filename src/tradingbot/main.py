@@ -71,7 +71,10 @@ def build_engine(settings: Settings) -> Engine:
     # nothing to stream and the engine runs on the REST/cache tick.
     stream = None if (settings.datafeed.enabled and settings.datafeed.only) \
         else _build_stream(settings)
-    engine = Engine(settings, router, strategies, stream=stream)
+    from tradingbot.interface.notifier import TradeNotifier
+
+    notifier = TradeNotifier(settings.notifier)
+    engine = Engine(settings, router, strategies, stream=stream, notifier=notifier)
     if data_feed is not None:
         engine.candle_source = data_feed.candles_snapshot
     return engine
