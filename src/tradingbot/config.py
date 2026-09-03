@@ -152,8 +152,17 @@ class NotifierSettings(BaseSettings):
     kalshi_chat_id: int = 0
     pm_token: str = ""             # Polymarket US bot
     pm_chat_id: int = 0
-    baseline_usd: float = 250.0    # per-venue deposit, for P&L = equity - baseline
+    # P&L = equity - baseline. Set the per-venue baseline to that venue's balance
+    # at go-live so P&L reads $0 until real trades move it (matches the app).
+    baseline_usd: float = 250.0    # fallback when a per-venue baseline is 0
+    kalshi_baseline: float = 0.0   # 0 => use baseline_usd
+    pm_baseline: float = 0.0
     summary_hour: int = 9          # local hour (0-23) for the daily per-venue summary; -1 disables
+
+    def baseline_for(self, venue) -> float:
+        from tradingbot.models import Venue
+        per = {Venue.KALSHI: self.kalshi_baseline, Venue.POLYMARKET: self.pm_baseline}.get(venue, 0.0)
+        return per or self.baseline_usd
 
 
 class GoalSettings(BaseSettings):
