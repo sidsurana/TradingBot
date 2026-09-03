@@ -180,10 +180,35 @@ class Engine:
             await self.notifier.announce(
                 venue, f"online — watching for arbs.\nEquity ${eq:.2f}  |  P&L {sign}${abs(pnl):.2f}")
 
+    async def _daily_summary(self) -> None:
+        """Once a day at the configured local hour, text each venue bot its P&L
+        and today's trade counts — a check-in even on days with no trades."""
+        hour = self.settings.notifier.summary_hour
+        if self.notifier is None or not self.notifier.any_configured or not 0 <= hour <= 23:
+            return
+        while not self._stop.is_set():
+            now = datetime.now()
+            target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=(target - now).total_seconds())
+                return  # stopped during the wait
+            except asyncio.TimeoutError:
+                pass    # reached the summary hour
+            for venue in (Venue.KALSHI, Venue.POLYMARKET):
+                if not self.notifier.configured_for(venue):
+                    continue
+                eq, pnl = await self._venue_equity_pnl(venue)
+                t = self._daily_trades[venue]
+                await self.notifier.summary(venue, eq, pnl, t["buys"], t["sells"])
+            self._daily_trades.clear()
+
     async def run(self) -> None:
         if not self.markets:
             await self.discover()
         await self._announce_online()
+        summary_task = asyncio.create_task(self._daily_summary())
         reactor_task = None
         if self.stream is not None:
             await self.stream.start(self.markets)
