@@ -675,26 +675,23 @@ class Engine:
         for p in positions:
             size, avg = float(p.size), float(p.avg_price)
             mark = None
-            if self.stream is not None:
+            if self.stream is not None:                 # live mid from the arb stream
                 b = self.stream.book(p.market.key)
                 if b is not None and b.mid is not None:
                     mark = b.mid
-            if mark is None and adapter is not None:  # untracked market -> fetch its book
+            if mark is None and adapter is not None:     # untracked -> fetch its book
                 try:
                     b = await adapter.fetch_order_book(p.market)
                     if b.mid is not None:
                         mark = b.mid
                 except Exception:  # noqa: BLE001
                     pass
-            if mark is not None:
-                upnl = (mark - avg) * size
-                pos_value += mark * size
-                lines.append(f"• {p.market.title[:48]} ({p.market.outcome}): "
-                             f"{size:g} @ {avg:.3f}, mark {mark:.3f}, uPnL ${upnl:+.2f}")
-            else:
-                pos_value += avg * size
-                lines.append(f"• {p.market.title[:48]} ({p.market.outcome}): "
-                             f"{size:g} @ {avg:.3f}, mark None, uPnL $None")
+            if mark is None:                             # no live two-sided quote -> mark at cost
+                mark = avg
+            upnl = (mark - avg) * size
+            pos_value += mark * size
+            lines.append(f"• {p.market.title[:48]} ({p.market.outcome}): "
+                         f"{size:g} @ {avg:.3f}, mark {mark:.3f}, uPnL ${upnl:+.2f}")
         equity = cash + pos_value
         baseline = self.settings.notifier.baseline_for(venue)
         return {"cash": cash, "equity": equity, "pnl": equity - baseline,
