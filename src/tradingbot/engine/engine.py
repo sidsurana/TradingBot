@@ -196,12 +196,13 @@ class Engine:
                 return  # stopped during the wait
             except asyncio.TimeoutError:
                 pass    # reached the summary hour
+            date_str = datetime.now().strftime("%d %b %Y")
             for venue in (Venue.KALSHI, Venue.POLYMARKET):
                 if not self.notifier.configured_for(venue):
                     continue
-                eq, pnl = await self._venue_equity_pnl(venue)
+                snap = await self._venue_snapshot(venue)
                 t = self._daily_trades[venue]
-                await self.notifier.summary(venue, eq, pnl, t["buys"], t["sells"])
+                await self.notifier.daily_report(venue, snap, t["buys"], t["sells"], date_str)
             self._daily_trades.clear()
 
     async def run(self) -> None:
