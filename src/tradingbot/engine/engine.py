@@ -616,7 +616,43 @@ class Engine:
                 equity = float(bal) + sum(float(p.size) * float(p.avg_price) for p in positions)
             except Exception as exc:  # noqa: BLE001
                 log.warning("pnl.error", venue=venue.value, error=str(exc))
-        return equity, equity - self.settings.notifier.baseline_usd
+        return equity, equity - self.settings.notifier.baseline_for(venue)
+
+    async def _venue_snapshot(self, venue) -> dict:
+        """Cash, mark-to-market equity, P&L, and per-position lines (title, size,
+        avg, mark, uPnL) for a venue — the rich daily-report payload."""
+        adapter = self.router._venues.get(venue)
+        cash = 0.0
+        if adapter is not None and getattr(adapter, "fetch_balance", None):
+            try:
+                cash = float(await adapter.fetch_balance())
+            except Exception as exc:  # noqa: BLE001
+                log.warning("snapshot.balance_error", venue=venue.value, error=str(exc))
+        positions, lines, pos_value = [], [], 0.0
+        try:
+            positions = await adapter.fetch_positions() if adapter is not None else []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("snapshot.positions_error", venue=venue.value, error=str(exc))
+        for p in positions:
+            size, avg = float(p.size), float(p.avg_price)
+            mark = None
+            if self.stream is not None:
+                b = self.stream.book(p.market.key)
+                if b is not None and b.mid is not None:
+                    mark = b.mid
+            if mark is not None:
+                upnl = (mark - avg) * size
+                pos_value += mark * size
+                lines.append(f"• {p.market.title[:48]} ({p.market.outcome}): "
+                             f"{size:g} @ {avg:.3f}, mark {mark:.3f}, uPnL ${upnl:+.2f}")
+            else:
+                pos_value += avg * size
+                lines.append(f"• {p.market.title[:48]} ({p.market.outcome}): "
+                             f"{size:g} @ {avg:.3f}, mark None, uPnL $None")
+        equity = cash + pos_value
+        baseline = self.settings.notifier.baseline_for(venue)
+        return {"cash": cash, "equity": equity, "pnl": equity - baseline,
+                "baseline": baseline, "positions": lines}
 
     async def _refresh_books(self) -> dict[str, OrderBook]:
         # Streaming path: read live books from the WS cache (instant). REST-fill
