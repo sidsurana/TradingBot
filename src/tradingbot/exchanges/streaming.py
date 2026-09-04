@@ -272,7 +272,12 @@ class KalshiStream(StreamClient):
         while True:
             try:
                 headers = self._signer("GET", "/trade-api/ws/v2") if self._signer else {}
-                async with websockets.connect(url, additional_headers=headers) as ws:
+                # Lenient keepalive: under a burst of book frames the default
+                # 20s ping-timeout fires spuriously and drops the socket. Give the
+                # pong plenty of slack so we don't churn reconnects (and miss ticks).
+                async with websockets.connect(url, additional_headers=headers,
+                                              ping_interval=20, ping_timeout=60,
+                                              close_timeout=5, max_size=None) as ws:
                     await ws.send(json.dumps({"id": 1, "cmd": "subscribe", "params": {
                         "channels": ["orderbook_delta"],
                         "market_tickers": list(key_by_ticker)}}))
