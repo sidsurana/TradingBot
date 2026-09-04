@@ -21,7 +21,7 @@ def test_unconfigured_is_fully_silent():
 def test_headers_label_each_agent():
     n = TradeNotifier(NotifierSettings())
     assert n._header(Venue.KALSHI) == "🟦 KALSHI AGENT"
-    assert n._header(Venue.POLYMARKET) == "🟪 POLYMARKET US AGENT"
+    assert n._header(Venue.POLYMARKET) == "🟪 POLYMARKET AGENT"
 
 
 @pytest.mark.asyncio
