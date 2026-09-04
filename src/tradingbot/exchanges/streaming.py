@@ -357,7 +357,11 @@ class PolymarketUSStream(StreamClient):
         while True:
             try:
                 headers = self._signer("GET", path) if self._signer else {}
-                async with websockets.connect(url, additional_headers=headers, max_size=None) as ws:
+                # Lenient keepalive (the server also sends its own heartbeats,
+                # which we echo) so a frame burst can't trip a 20s ping timeout.
+                async with websockets.connect(url, additional_headers=headers, max_size=None,
+                                              ping_interval=20, ping_timeout=60,
+                                              close_timeout=5) as ws:
                     for i in range(0, len(slugs), 100):  # max 100 markets per subscription
                         await ws.send(json.dumps({"subscribe": {
                             "requestId": f"md-{i // 100}",
