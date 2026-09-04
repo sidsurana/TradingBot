@@ -221,7 +221,9 @@ class Engine:
             try:
                 offset, msgs = await self.notifier.poll(venue, offset)
             except Exception as exc:  # noqa: BLE001
-                log.warning("responder.poll_error", venue=venue.value, error=str(exc))
+                # Long-poll read-timeouts are normal/benign; log type for the rest.
+                log.debug("responder.poll_error", venue=venue.value,
+                          error=f"{type(exc).__name__}: {exc}")
                 await asyncio.sleep(3)
                 continue
             for chat_id, text in msgs:
